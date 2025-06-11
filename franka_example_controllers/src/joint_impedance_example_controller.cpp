@@ -73,6 +73,12 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
                     << coriolis_factor_);
   }
 
+  // Check if external command mode should be enabled
+  if (!node_handle.getParam("use_external_command", use_external_command_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: use_external_command not found. Defaulting to "
+                    << use_external_command_);
+  }
+
   auto* model_interface = robot_hw->get<franka_hw::FrankaModelInterface>();
   if (model_interface == nullptr) {
     ROS_ERROR_STREAM(
@@ -89,20 +95,44 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     return false;
   }
 
-  auto* cartesian_pose_interface = robot_hw->get<franka_hw::FrankaPoseCartesianInterface>();
-  if (cartesian_pose_interface == nullptr) {
-    ROS_ERROR_STREAM(
-        "JointImpedanceExampleController: Error getting cartesian pose interface from hardware");
-    return false;
+  // Always get the state interface for robot state access
+  if (use_external_command_) {
+    auto* state_interface = robot_hw->get<franka_hw::FrankaStateInterface>();
+    if (state_interface == nullptr) {
+      ROS_ERROR_STREAM(
+          "JointImpedanceExampleController: Error getting state interface from hardware");
+      return false;
+    }
+    try {
+      state_handle_ = std::make_unique<franka_hw::FrankaStateHandle>(
+          state_interface->getHandle(arm_id + "_robot"));
+    } catch (hardware_interface::HardwareInterfaceException& ex) {
+      ROS_ERROR_STREAM(
+          "JointImpedanceExampleController: Exception getting state handle from interface: "
+          << ex.what());
+      return false;
+    }
   }
-  try {
-    cartesian_pose_handle_ = std::make_unique<franka_hw::FrankaCartesianPoseHandle>(
-        cartesian_pose_interface->getHandle(arm_id + "_robot"));
-  } catch (hardware_interface::HardwareInterfaceException& ex) {
-    ROS_ERROR_STREAM(
-        "JointImpedanceExampleController: Exception getting cartesian pose handle from interface: "
-        << ex.what());
-    return false;
+
+  // Only claim Cartesian interface if external command mode is disabled
+  if (!use_external_command_) {
+    auto* cartesian_pose_interface = robot_hw->get<franka_hw::FrankaPoseCartesianInterface>();
+    if (cartesian_pose_interface == nullptr) {
+      ROS_ERROR_STREAM(
+          "JointImpedanceExampleController: Error getting cartesian pose interface from hardware");
+      return false;
+    }
+    try {
+      cartesian_pose_handle_ = std::make_unique<franka_hw::FrankaCartesianPoseHandle>(
+          cartesian_pose_interface->getHandle(arm_id + "_robot"));
+    } catch (hardware_interface::HardwareInterfaceException& ex) {
+      ROS_ERROR_STREAM(
+          "JointImpedanceExampleController: Exception getting cartesian pose handle from interface: "
+          << ex.what());
+      return false;
+    }
+  } else {
+    ROS_INFO("JointImpedanceExampleController: External command mode enabled - skipping Cartesian interface");
   }
 
   auto* effort_joint_interface = robot_hw->get<hardware_interface::EffortJointInterface>();
@@ -121,40 +151,95 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     }
   }
   torques_publisher_.init(node_handle, "torque_comparison", 1);
+  joint_command_sub_ = node_handle.subscribe(
+    "joint_command", 1, &JointImpedanceExampleController::jointCommandCallback, this);
+
+  // Initialize external command variables
+  for (size_t i = 0; i < 7; ++i) {
+    q_desired_target_[i] = 0.0;  // Will be set to current position in starting()
+  }
+
+  external_command_received_ = false;
 
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
 
   return true;
 }
 
+// 添加回调函数
+void JointImpedanceExampleController::jointCommandCallback(
+    const std_msgs::Float64MultiArrayConstPtr& msg) {
+  if (msg->data.size() != 7) {
+    ROS_ERROR("Joint command must have 7 elements");
+    return;
+  }
+  
+  for (size_t i = 0; i < 7; ++i) {
+    q_desired_target_[i] = msg->data[i];
+  }
+  
+  if (use_external_command_) {
+    external_command_received_ = true;
+    ROS_INFO("Received external joint command");
+  } else {
+    ROS_WARN("Received joint command but external command mode is disabled");
+  }
+}
+
 void JointImpedanceExampleController::starting(const ros::Time& /*time*/) {
-  initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+  if (cartesian_pose_handle_) {
+    initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+    
+    // Initialize target positions to current joint positions
+    franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();
+    for (size_t i = 0; i < 7; ++i) {
+      q_desired_target_[i] = robot_state.q[i];
+    }
+  } else {
+    // In external command mode, initialize target positions to current joint positions
+    franka::RobotState robot_state = state_handle_->getRobotState();
+    for (size_t i = 0; i < 7; ++i) {
+      q_desired_target_[i] = robot_state.q[i];
+    }
+    ROS_INFO("JointImpedanceExampleController: Starting in external command mode");
+  }
 }
 
 void JointImpedanceExampleController::update(const ros::Time& /*time*/,
                                              const ros::Duration& period) {
-  if (vel_current_ < vel_max_) {
-    vel_current_ += period.toSec() * std::fabs(vel_max_ / acceleration_time_);
+  franka::RobotState robot_state;
+  if (cartesian_pose_handle_) {
+    robot_state = cartesian_pose_handle_->getRobotState();
+  } else {
+    robot_state = state_handle_->getRobotState();
   }
-  vel_current_ = std::fmin(vel_current_, vel_max_);
-
-  angle_ += period.toSec() * vel_current_ / std::fabs(radius_);
-  if (angle_ > 2 * M_PI) {
-    angle_ -= 2 * M_PI;
-  }
-
-  double delta_y = radius_ * (1 - std::cos(angle_));
-  double delta_z = radius_ * std::sin(angle_);
-
-  std::array<double, 16> pose_desired = initial_pose_;
-  pose_desired[13] += delta_y;
-  pose_desired[14] += delta_z;
-  cartesian_pose_handle_->setCommand(pose_desired);
-
-  franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();
+  
   std::array<double, 7> coriolis = model_handle_->getCoriolis();
   std::array<double, 7> gravity = model_handle_->getGravity();
 
+  if (!use_external_command_ && cartesian_pose_handle_)
+  {
+    if (vel_current_ < vel_max_) {
+      vel_current_ += period.toSec() * std::fabs(vel_max_ / acceleration_time_);
+    }
+    vel_current_ = std::fmin(vel_current_, vel_max_);
+
+    angle_ += period.toSec() * vel_current_ / std::fabs(radius_);
+    if (angle_ > 2 * M_PI) {
+      angle_ -= 2 * M_PI;
+    }
+
+    double delta_y = radius_ * (1 - std::cos(angle_));
+    double delta_z = radius_ * std::sin(angle_);
+
+    std::array<double, 16> pose_desired = initial_pose_;
+    pose_desired[13] += delta_y;
+    pose_desired[14] += delta_z;
+    cartesian_pose_handle_->setCommand(pose_desired);
+  }
+  // Note: When using external command mode, we only use joint torque control
+  // and don't send Cartesian pose commands to avoid conflicts
+  
   double alpha = 0.99;
   for (size_t i = 0; i < 7; i++) {
     dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];
@@ -162,14 +247,55 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
 
   std::array<double, 7> tau_d_calculated;
   for (size_t i = 0; i < 7; ++i) {
+
+    double q_target = 0.0;
+    double dq_target = 0.0;
+    if (use_external_command_ && external_command_received_) {
+      q_target = q_desired_target_[i];
+      dq_target = 0.0;
+    }
+    else if (use_external_command_ && !external_command_received_) {
+      // When external command mode is enabled but no command received yet,
+      // maintain current position
+      q_target = robot_state.q[i];
+      dq_target = 0.0;
+    }
+    else {
+      q_target = robot_state.q_d[i];
+      dq_target = robot_state.dq_d[i];
+    }
+    
     tau_d_calculated[i] = coriolis_factor_ * coriolis[i] +
-                          k_gains_[i] * (robot_state.q_d[i] - robot_state.q[i]) +
-                          d_gains_[i] * (robot_state.dq_d[i] - dq_filtered_[i]);
+                          k_gains_[i] * (q_target - robot_state.q[i]) +
+                          d_gains_[i] * (dq_target - dq_filtered_[i]);
   }
 
   // Maximum torque difference with a sampling rate of 1 kHz. The maximum torque rate is
   // 1000 * (1 / sampling_time).
   std::array<double, 7> tau_d_saturated = saturateTorqueRate(tau_d_calculated, robot_state.tau_J_d);
+
+  // Debug: Print joint targets, current positions, and torques periodically
+  static int debug_counter = 0;
+  if (use_external_command_ && external_command_received_ && (debug_counter % 1000 == 0)) {
+    ROS_INFO("Target joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
+             q_desired_target_[0], q_desired_target_[1], q_desired_target_[2], 
+             q_desired_target_[3], q_desired_target_[4], q_desired_target_[5], q_desired_target_[6]);
+    ROS_INFO("Current joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
+             robot_state.q[0], robot_state.q[1], robot_state.q[2], 
+             robot_state.q[3], robot_state.q[4], robot_state.q[5], robot_state.q[6]);
+    ROS_INFO("Joint errors: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+             q_desired_target_[0] - robot_state.q[0], q_desired_target_[1] - robot_state.q[1], 
+             q_desired_target_[2] - robot_state.q[2], q_desired_target_[3] - robot_state.q[3],
+             q_desired_target_[4] - robot_state.q[4], q_desired_target_[5] - robot_state.q[5], 
+             q_desired_target_[6] - robot_state.q[6]);
+    ROS_INFO("Calculated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+             tau_d_calculated[0], tau_d_calculated[1], tau_d_calculated[2],
+             tau_d_calculated[3], tau_d_calculated[4], tau_d_calculated[5], tau_d_calculated[6]);
+    ROS_INFO("Saturated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+             tau_d_saturated[0], tau_d_saturated[1], tau_d_saturated[2],
+             tau_d_saturated[3], tau_d_saturated[4], tau_d_saturated[5], tau_d_saturated[6]);
+  }
+  debug_counter++;
 
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d_saturated[i]);
