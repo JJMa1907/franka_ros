@@ -223,6 +223,9 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     last_interpolated_position_[i] = 0.0;
     last_interpolated_velocity_[i] = 0.0;
   }
+  
+  // Initialize trajectory completion progress counter
+  trajectory_completion_countdown_ = 0;
 
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
 
@@ -260,10 +263,13 @@ void JointImpedanceExampleController::jointCommandCallback(
     target_velocity[i] = 0.0; // Default velocity for single point commands
   }
   
-  // Log the received joint command
+  // Log the received joint command (keep this for user troubleshooting)
   ROS_INFO("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
            target_position[0], target_position[1], target_position[2],
            target_position[3], target_position[4], target_position[5], target_position[6]);
+  
+  // Save the target position for when the trajectory is complete
+  q_desired_target_ = target_position;
   
   // Add trajectory point with full trajectory interpolation (deoxys-compatible)
   addTrajectoryPoint(target_position, target_velocity);
@@ -302,6 +308,7 @@ void JointImpedanceExampleController::starting(const ros::Time& time) {
   trajectory_start_time_ = time.toSec();
   trajectory_active_ = false;
   current_trajectory_index_ = 0;
+  trajectory_completion_countdown_ = 0;
   clearTrajectory();
 }
 
@@ -378,24 +385,23 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     if (use_external_command_ && external_command_received_) {
       // Use trajectory interpolation for external commands (deoxys-compatible)
       if (isTrajectoryActive()) {
-        std::array<double, 7> target_velocity;
-        std::array<double, 7> interpolated_position = interpolateTrajectory(ros::Time::now().toSec(), target_velocity);
-        q_target = interpolated_position[i];
-        dq_target = target_velocity[i];
+        // Only call interpolateTrajectory once per update cycle and store the results
+        static std::array<double, 7> interpolated_position_cache;
+        static std::array<double, 7> target_velocity_cache;
         
-        // Debug: Print interpolated targets for first joint only
-        if (i == 0 && (debug_counter % 1000 == 0)) {
-          ROS_INFO("Debug: Interpolated target for joint 0: %.3f", q_target);
+        // First joint iteration - calculate interpolation for all joints
+        if (i == 0) {
+          target_velocity_cache = {};
+          interpolated_position_cache = interpolateTrajectory(ros::Time::now().toSec(), target_velocity_cache);
         }
+        
+        // Use the cached values
+        q_target = interpolated_position_cache[i];
+        dq_target = target_velocity_cache[i];
       } else {
-        // No active trajectory, maintain current position
-        q_target = current_q;
+        // No active trajectory, use the desired target position
+        q_target = q_desired_target_[i];
         dq_target = 0.0;
-        
-        // Debug: Print when maintaining current position
-        if (i == 0 && (debug_counter % 1000 == 0)) {
-          ROS_INFO("Debug: No active trajectory, maintaining current position: %.3f", q_target);
-        }
       }
     }
     else if (use_external_command_ && !external_command_received_) {
@@ -437,20 +443,38 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
 
   // Debug: Print joint targets, current positions, and torques periodically
   if (use_external_command_ && external_command_received_ && (debug_counter % 1000 == 0)) {
-    ROS_INFO("Target joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
+    std::array<double, 7> control_targets;
+    
+    // Let's get the actual control targets we're using (either from trajectory interpolation or desired targets)
+    if (isTrajectoryActive()) {
+      std::array<double, 7> dummy_velocity;
+      control_targets = interpolateTrajectory(ros::Time::now().toSec(), dummy_velocity);
+    } else {
+      control_targets = q_desired_target_;
+    }
+    
+    ROS_INFO("Desired target: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
              q_desired_target_[0], q_desired_target_[1], q_desired_target_[2], 
              q_desired_target_[3], q_desired_target_[4], q_desired_target_[5], q_desired_target_[6]);
+             
+    ROS_INFO("Control target: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
+             control_targets[0], control_targets[1], control_targets[2], 
+             control_targets[3], control_targets[4], control_targets[5], control_targets[6]);
+             
     ROS_INFO("Current joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
              robot_state.q[0], robot_state.q[1], robot_state.q[2], 
              robot_state.q[3], robot_state.q[4], robot_state.q[5], robot_state.q[6]);
+             
     ROS_INFO("Joint errors: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-             q_desired_target_[0] - robot_state.q[0], q_desired_target_[1] - robot_state.q[1], 
-             q_desired_target_[2] - robot_state.q[2], q_desired_target_[3] - robot_state.q[3],
-             q_desired_target_[4] - robot_state.q[4], q_desired_target_[5] - robot_state.q[5], 
-             q_desired_target_[6] - robot_state.q[6]);
+             control_targets[0] - robot_state.q[0], control_targets[1] - robot_state.q[1], 
+             control_targets[2] - robot_state.q[2], control_targets[3] - robot_state.q[3],
+             control_targets[4] - robot_state.q[4], control_targets[5] - robot_state.q[5], 
+             control_targets[6] - robot_state.q[6]);
+             
     ROS_INFO("Calculated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
              tau_d_calculated[0], tau_d_calculated[1], tau_d_calculated[2],
              tau_d_calculated[3], tau_d_calculated[4], tau_d_calculated[5], tau_d_calculated[6]);
+             
     ROS_INFO("Saturated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
              tau_d_saturated[0], tau_d_saturated[1], tau_d_saturated[2],
              tau_d_saturated[3], tau_d_saturated[4], tau_d_saturated[5], tau_d_saturated[6]);
@@ -507,22 +531,19 @@ void JointImpedanceExampleController::addTrajectoryPoint(
   trajectory_buffer_.push_back(point);
   
   // Start trajectory if this is the first point
-  ROS_INFO("Trajectory active before adding point: %s", trajectory_active_ ? "true" : "false");
   if (!trajectory_active_) {
     trajectory_active_ = true;
     trajectory_start_time_ = point.timestamp;
     current_trajectory_index_ = 0;
     
-    // Initialize interpolated position to current position
+    // Initialize interpolated position to current smoothed robot position, not target position
+    // This ensures trajectory interpolation starts from current position and gradually moves to target
+    // We use position_smoothed_ which is the current filtered robot position
     for (size_t i = 0; i < 7; ++i) {
-      last_interpolated_position_[i] = position[i];
-      last_interpolated_velocity_[i] = velocity[i];
+      last_interpolated_position_[i] = position_smoothed_[i];
+      last_interpolated_velocity_[i] = velocity_smoothed_[i];
     }
-    ROS_INFO("Trajectory started! Set trajectory_active_ = true");
   }
-  ROS_INFO("Trajectory active after adding point: %s", trajectory_active_ ? "true" : "false");
-  ROS_INFO("Added trajectory point: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-           position[0], position[1], position[2], position[3], position[4], position[5], position[6]);
   
   // Limit buffer size to prevent memory issues
   const size_t max_buffer_size = 100;
@@ -547,42 +568,74 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   double target_time = trajectory_start_time_ + scaled_time;
   
   // Find the current target point
-  if (current_trajectory_index_ < trajectory_buffer_.size()) {
-    const TrajectoryPoint& target_point = trajectory_buffer_[current_trajectory_index_];
+  if (current_trajectory_index_ >= trajectory_buffer_.size()) {
+    // We've already reached the end of the trajectory
+    trajectory_active_ = false;
+    return interpolated_position;
+  }
+  
+  const TrajectoryPoint& target_point = trajectory_buffer_[current_trajectory_index_];
+  
+  // LINEAR_JOINT_POSITION interpolation implementation
+  for (size_t i = 0; i < 7; ++i) {
+    double position_error = target_point.position[i] - last_interpolated_position_[i];
     
-    // LINEAR_JOINT_POSITION interpolation implementation
-    for (size_t i = 0; i < 7; ++i) {
-      double position_error = target_point.position[i] - last_interpolated_position_[i];
-      
-      // Apply max_delta_q constraint (from deoxys config)
-      double max_delta = max_delta_position_per_cycle_[i];
-      double delta_position = std::max(std::min(position_error, max_delta), -max_delta);
-      
-      // Linear interpolation with velocity constraint
-      interpolated_position[i] = last_interpolated_position_[i] + delta_position;
-      target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
-      
-      // Apply velocity smoothing
-      target_velocity[i] = std::max(std::min(target_velocity[i], 0.5), -0.5); // rad/s limit
-    }
+    // Apply max_delta_q constraint (from deoxys config)
+    double max_delta = max_delta_position_per_cycle_[i];
+    double delta_position = std::max(std::min(position_error, max_delta), -max_delta);
     
-    // Check if we've reached the target point (within tolerance)
-    bool reached_target = true;
-    const double position_tolerance = 0.001; // 1mm tolerance
-    for (size_t i = 0; i < 7; ++i) {
-      if (std::abs(interpolated_position[i] - target_point.position[i]) > position_tolerance) {
-        reached_target = false;
-        break;
+    // Linear interpolation with velocity constraint
+    interpolated_position[i] = last_interpolated_position_[i] + delta_position;
+    target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
+    
+    // Apply velocity smoothing
+    target_velocity[i] = std::max(std::min(target_velocity[i], 0.5), -0.5); // rad/s limit
+  }
+  
+  // Check if we've reached the target point (within tolerance)
+  bool reached_target = true;
+  const double position_tolerance = 0.01; // 0.01 radians (about 0.57 degrees)
+  
+  // Debug: Log tolerance check details for first interpolation call
+  static bool first_call = true;
+  
+  for (size_t i = 0; i < 7; ++i) {
+    double error = std::abs(interpolated_position[i] - target_point.position[i]);
+    
+    // Debug logging for first call
+    if (first_call) {
+      if (i == 0) {
+        ROS_INFO("First interpolation call - tolerance check:");
       }
+      ROS_INFO("Joint %zu: interpolated=%.6f, target=%.6f, error=%.6f, tolerance=%.6f", 
+               i, interpolated_position[i], target_point.position[i], error, position_tolerance);
     }
     
-    if (reached_target) {
-      // Move to next trajectory point
-      current_trajectory_index_++;
-      if (current_trajectory_index_ >= trajectory_buffer_.size()) {
-        // Trajectory completed
-        trajectory_active_ = false;
-        ROS_DEBUG("Trajectory completed");
+    // Actual tolerance check logic
+    if (error > position_tolerance) {
+      reached_target = false;
+      break;
+    }
+  }
+  
+  // Only advance if we've reached the target
+  if (reached_target) {
+    // We've reached the target, move to next point
+    current_trajectory_index_++;
+    
+    if (current_trajectory_index_ >= trajectory_buffer_.size()) {
+      // We've reached the last point, but don't deactivate trajectory yet
+      // This ensures the final position is properly held for one more cycle
+    }
+  } else {
+    // If we're on the last point and been trying for a while, consider forcing completion
+    if (current_trajectory_index_ == (trajectory_buffer_.size() - 1)) {
+      const int max_attempts = 500; // Allow 500ms of attempts (500 control cycles)
+      if (trajectory_completion_countdown_ > max_attempts) {
+        current_trajectory_index_++;
+        trajectory_completion_countdown_ = 0;
+      } else {
+        trajectory_completion_countdown_++;
       }
     }
   }
@@ -591,21 +644,31 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   last_interpolated_position_ = interpolated_position;
   last_interpolated_velocity_ = target_velocity;
   
+  // If trajectory is at end but still active, deactivate it now
+  if (current_trajectory_index_ >= trajectory_buffer_.size() && trajectory_active_) {
+    trajectory_active_ = false;
+    
+    // Update target positions to match final position from trajectory
+    if (!trajectory_buffer_.empty()) {
+      q_desired_target_ = trajectory_buffer_.back().position;
+    }
+  }
+  
   return interpolated_position;
 }
 
 void JointImpedanceExampleController::clearTrajectory() {
   trajectory_buffer_.clear();
   trajectory_active_ = false;
-  ROS_INFO("Trajectory active after clearTrajectory: %s", trajectory_active_ ? "true" : "false");
+  trajectory_completion_countdown_ = 0;
   current_trajectory_index_ = 0;
 }
 
 bool JointImpedanceExampleController::isTrajectoryActive() const {
   
   //ROS info for debugging trajectory status
-  ROS_INFO("isTrajectoryActive() called: trajectory_active_ = %s, buffer size = %zu",
-    trajectory_active_ ? "true" : "false", trajectory_buffer_.empty() ? 0 : trajectory_buffer_.size());
+  // ROS_INFO("isTrajectoryActive() called: trajectory_active_ = %s, buffer size = %zu",
+    // trajectory_active_ ? "true" : "false", trajectory_buffer_.empty() ? 0 : trajectory_buffer_.size());
   return trajectory_active_ && !trajectory_buffer_.empty();
 }
 

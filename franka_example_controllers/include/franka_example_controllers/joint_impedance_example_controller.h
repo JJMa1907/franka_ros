@@ -35,9 +35,6 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
  private:
   // Joint command callback
   void jointCommandCallback(const std_msgs::Float64MultiArrayConstPtr& msg);
-  
-  // Trajectory command callback (deoxys-compatible)
-  void trajectoryCommandCallback(const franka_example_controllers::JointTrajectoryCommandConstPtr& msg);
 
   // Trajectory interpolation methods
   struct TrajectoryPoint {
@@ -48,6 +45,12 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
 
   void addTrajectoryPoint(const std::array<double, 7>& position, 
                          const std::array<double, 7>& velocity = {0,0,0,0,0,0,0});
+  /**
+   * Interpolates the trajectory to produce smooth motion.
+   * @param current_time The current time
+   * @param target_velocity Output parameter for calculated velocity
+   * @return Interpolated position array
+   */
   std::array<double, 7> interpolateTrajectory(double current_time, 
                                              std::array<double, 7>& target_velocity);
   void clearTrajectory();
@@ -84,6 +87,7 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
   bool trajectory_active_;
   std::array<double, 7> last_interpolated_position_;
   std::array<double, 7> last_interpolated_velocity_;
+  int trajectory_completion_countdown_{0};  // Counter to ensure trajectory completes even if tolerance isn't met
   
   // Max delta position per control cycle (from deoxys config)
   std::array<double, 7> max_delta_position_per_cycle_;
