@@ -263,8 +263,8 @@ void JointImpedanceExampleController::jointCommandCallback(
     target_velocity[i] = 0.0; // Default velocity for single point commands
   }
   
-  // Log the received joint command (keep this for user troubleshooting)
-  ROS_INFO("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+  // Log the received joint command at debug level
+  ROS_DEBUG("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
            target_position[0], target_position[1], target_position[2],
            target_position[3], target_position[4], target_position[5], target_position[6]);
   
@@ -360,9 +360,6 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
 
   std::array<double, 7> tau_d_calculated;
   
-  // Debug counter for periodic logging
-  static int debug_counter = 0;
-  
   for (size_t i = 0; i < 7; ++i) {
 
     double q_target = 0.0;
@@ -371,16 +368,6 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     // Use smoothed positions for control (deoxys-compatible state estimation)
     double current_q = position_smoothed_[i];
     double current_dq = velocity_smoothed_[i];
-    
-  // Debug: Print trajectory status for the first joint only
-    if (i == 0 && (debug_counter % 1000 == 0)) {
-      ROS_INFO("Debug: use_external_command_=%s, external_command_received_=%s, isTrajectoryActive()=%s",
-               use_external_command_ ? "true" : "false",
-               external_command_received_ ? "true" : "false",
-               isTrajectoryActive() ? "true" : "false");
-      ROS_INFO("Debug: trajectory_buffer_.size()=%zu, trajectory_active_=%s",
-               trajectory_buffer_.size(), trajectory_active_ ? "true" : "false");
-    }
     
     if (use_external_command_ && external_command_received_) {
       // Use trajectory interpolation for external commands (deoxys-compatible)
@@ -440,46 +427,6 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   // Maximum torque difference with a sampling rate of 1 kHz. The maximum torque rate is
   // 1000 * (1 / sampling_time).
   std::array<double, 7> tau_d_saturated = saturateTorqueRate(tau_d_calculated, robot_state.tau_J_d);
-
-  // Debug: Print joint targets, current positions, and torques periodically
-  if (use_external_command_ && external_command_received_ && (debug_counter % 1000 == 0)) {
-    std::array<double, 7> control_targets;
-    
-    // Let's get the actual control targets we're using (either from trajectory interpolation or desired targets)
-    if (isTrajectoryActive()) {
-      std::array<double, 7> dummy_velocity;
-      control_targets = interpolateTrajectory(ros::Time::now().toSec(), dummy_velocity);
-    } else {
-      control_targets = q_desired_target_;
-    }
-    
-    ROS_INFO("Desired target: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
-             q_desired_target_[0], q_desired_target_[1], q_desired_target_[2], 
-             q_desired_target_[3], q_desired_target_[4], q_desired_target_[5], q_desired_target_[6]);
-             
-    ROS_INFO("Control target: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
-             control_targets[0], control_targets[1], control_targets[2], 
-             control_targets[3], control_targets[4], control_targets[5], control_targets[6]);
-             
-    ROS_INFO("Current joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
-             robot_state.q[0], robot_state.q[1], robot_state.q[2], 
-             robot_state.q[3], robot_state.q[4], robot_state.q[5], robot_state.q[6]);
-             
-    ROS_INFO("Joint errors: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-             control_targets[0] - robot_state.q[0], control_targets[1] - robot_state.q[1], 
-             control_targets[2] - robot_state.q[2], control_targets[3] - robot_state.q[3],
-             control_targets[4] - robot_state.q[4], control_targets[5] - robot_state.q[5], 
-             control_targets[6] - robot_state.q[6]);
-             
-    ROS_INFO("Calculated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-             tau_d_calculated[0], tau_d_calculated[1], tau_d_calculated[2],
-             tau_d_calculated[3], tau_d_calculated[4], tau_d_calculated[5], tau_d_calculated[6]);
-             
-    ROS_INFO("Saturated torques: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-             tau_d_saturated[0], tau_d_saturated[1], tau_d_saturated[2],
-             tau_d_saturated[3], tau_d_saturated[4], tau_d_saturated[5], tau_d_saturated[6]);
-  }
-  debug_counter++;
 
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d_saturated[i]);
@@ -596,20 +543,8 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   bool reached_target = true;
   const double position_tolerance = 0.01; // 0.01 radians (about 0.57 degrees)
   
-  // Debug: Log tolerance check details for first interpolation call
-  static bool first_call = true;
-  
   for (size_t i = 0; i < 7; ++i) {
     double error = std::abs(interpolated_position[i] - target_point.position[i]);
-    
-    // Debug logging for first call
-    if (first_call) {
-      if (i == 0) {
-        ROS_INFO("First interpolation call - tolerance check:");
-      }
-      ROS_INFO("Joint %zu: interpolated=%.6f, target=%.6f, error=%.6f, tolerance=%.6f", 
-               i, interpolated_position[i], target_point.position[i], error, position_tolerance);
-    }
     
     // Actual tolerance check logic
     if (error > position_tolerance) {
@@ -665,10 +600,6 @@ void JointImpedanceExampleController::clearTrajectory() {
 }
 
 bool JointImpedanceExampleController::isTrajectoryActive() const {
-  
-  //ROS info for debugging trajectory status
-  // ROS_INFO("isTrajectoryActive() called: trajectory_active_ = %s, buffer size = %zu",
-    // trajectory_active_ ? "true" : "false", trajectory_buffer_.empty() ? 0 : trajectory_buffer_.size());
   return trajectory_active_ && !trajectory_buffer_.empty();
 }
 
