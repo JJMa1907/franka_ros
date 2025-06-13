@@ -15,7 +15,6 @@
 #include <std_msgs/Float64MultiArray.h>
 
 #include <franka_example_controllers/JointTorqueComparison.h>
-#include <franka_example_controllers/JointTrajectoryCommand.h>
 #include <franka_hw/franka_cartesian_command_interface.h>
 #include <franka_hw/franka_model_interface.h>
 #include <franka_hw/franka_state_interface.h>
@@ -66,9 +65,6 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
 
   // ROS subscriber for joint commands
   ros::Subscriber joint_command_sub_;
-  
-  // ROS subscriber for trajectory commands (deoxys-compatible)
-  ros::Subscriber trajectory_command_sub_;
   
   // External command variables
   std::array<double, 7> q_desired_target_;

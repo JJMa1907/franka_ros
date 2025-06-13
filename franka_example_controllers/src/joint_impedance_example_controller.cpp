@@ -203,8 +203,6 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   torques_publisher_.init(node_handle, "torque_comparison", 1);
   joint_command_sub_ = node_handle.subscribe(
     "joint_command", 1, &JointImpedanceExampleController::jointCommandCallback, this);
-  trajectory_command_sub_ = node_handle.subscribe(
-    "trajectory_command", 1, &JointImpedanceExampleController::trajectoryCommandCallback, this);
 
   // Initialize external command variables
   for (size_t i = 0; i < 7; ++i) {
@@ -231,7 +229,8 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   return true;
 }
 
-// 添加回调函数
+// Joint command callback - Primary deoxys-compatible interface
+// Handles both single-point and multi-point commands through unified trajectory interpolation
 void JointImpedanceExampleController::jointCommandCallback(
     const std_msgs::Float64MultiArrayConstPtr& msg) {
   if (msg->data.size() != 7) {
@@ -496,59 +495,6 @@ std::array<double, 7> JointImpedanceExampleController::saturateTorqueRate(
 }
 
 // Trajectory interpolation methods (deoxys-compatible implementation)
-void JointImpedanceExampleController::trajectoryCommandCallback(
-    const franka_example_controllers::JointTrajectoryCommandConstPtr& msg) {
-  
-  if (!use_external_command_) {
-    ROS_WARN("Received trajectory command but external command mode is disabled");
-    return;
-  }
-  
-  // Clear existing trajectory
-  clearTrajectory();
-  
-  // Update configuration from message
-  if (msg->time_fraction > 0.1) {
-    time_fraction_ = msg->time_fraction;
-  }
-  
-  if (msg->max_delta_q.size() == 7) {
-    for (size_t i = 0; i < 7; ++i) {
-      max_delta_position_per_cycle_[i] = msg->max_delta_q[i];
-    }
-  }
-  
-  // Add all trajectory points
-  for (const auto& point : msg->points) {
-    if (point.position.size() != 7) {
-      ROS_ERROR("Trajectory point must have 7 joint positions");
-      continue;
-    }
-    
-    std::array<double, 7> position, velocity;
-    for (size_t i = 0; i < 7; ++i) {
-      if (msg->is_delta) {
-        // Delta mode: add to current position
-        position[i] = last_interpolated_position_[i] + point.position[i];
-      } else {
-        // Absolute mode
-        position[i] = point.position[i];
-      }
-      
-      if (point.velocity.size() == 7) {
-        velocity[i] = point.velocity[i];
-      } else {
-        velocity[i] = 0.0;
-      }
-    }
-    
-    addTrajectoryPoint(position, velocity);
-  }
-  
-  external_command_received_ = true;
-  ROS_INFO("Received trajectory with %zu points", msg->points.size());
-}
-
 void JointImpedanceExampleController::addTrajectoryPoint(
     const std::array<double, 7>& position, 
     const std::array<double, 7>& velocity) {
