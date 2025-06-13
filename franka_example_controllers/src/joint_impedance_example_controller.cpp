@@ -254,7 +254,10 @@ void JointImpedanceExampleController::jointCommandCallback(
         target_position[i] = msg->data[i];
       }
     }
-    
+    // ros info the received joint command
+    ROS_INFO("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+             target_position[0], target_position[1], target_position[2],
+             target_position[3], target_position[4], target_position[5], target_position[6]);
     // Add trajectory point with LINEAR_JOINT_POSITION interpolation
     addTrajectoryPoint(target_position);
     external_command_received_ = true;
@@ -345,6 +348,10 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   }
 
   std::array<double, 7> tau_d_calculated;
+  
+  // Debug counter for periodic logging
+  static int debug_counter = 0;
+  
   for (size_t i = 0; i < 7; ++i) {
 
     double q_target = 0.0;
@@ -354,6 +361,16 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     double current_q = position_smoothed_[i];
     double current_dq = velocity_smoothed_[i];
     
+  // Debug: Print trajectory status for the first joint only
+    if (i == 0 && (debug_counter % 1000 == 0)) {
+      ROS_INFO("Debug: use_external_command_=%s, external_command_received_=%s, isTrajectoryActive()=%s",
+               use_external_command_ ? "true" : "false",
+               external_command_received_ ? "true" : "false",
+               isTrajectoryActive() ? "true" : "false");
+      ROS_INFO("Debug: trajectory_buffer_.size()=%zu, trajectory_active_=%s",
+               trajectory_buffer_.size(), trajectory_active_ ? "true" : "false");
+    }
+    
     if (use_external_command_ && external_command_received_) {
       // Use trajectory interpolation for external commands (deoxys-compatible)
       if (isTrajectoryActive()) {
@@ -361,10 +378,20 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
         std::array<double, 7> interpolated_position = interpolateTrajectory(ros::Time::now().toSec(), target_velocity);
         q_target = interpolated_position[i];
         dq_target = target_velocity[i];
+        
+        // Debug: Print interpolated targets for first joint only
+        if (i == 0 && (debug_counter % 1000 == 0)) {
+          ROS_INFO("Debug: Interpolated target for joint 0: %.3f", q_target);
+        }
       } else {
         // No active trajectory, maintain current position
         q_target = current_q;
         dq_target = 0.0;
+        
+        // Debug: Print when maintaining current position
+        if (i == 0 && (debug_counter % 1000 == 0)) {
+          ROS_INFO("Debug: No active trajectory, maintaining current position: %.3f", q_target);
+        }
       }
     }
     else if (use_external_command_ && !external_command_received_) {
@@ -405,7 +432,6 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   std::array<double, 7> tau_d_saturated = saturateTorqueRate(tau_d_calculated, robot_state.tau_J_d);
 
   // Debug: Print joint targets, current positions, and torques periodically
-  static int debug_counter = 0;
   if (use_external_command_ && external_command_received_ && (debug_counter % 1000 == 0)) {
     ROS_INFO("Target joints: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", 
              q_desired_target_[0], q_desired_target_[1], q_desired_target_[2], 
@@ -530,6 +556,7 @@ void JointImpedanceExampleController::addTrajectoryPoint(
   trajectory_buffer_.push_back(point);
   
   // Start trajectory if this is the first point
+  ROS_INFO("Trajectory active before adding point: %s", trajectory_active_ ? "true" : "false");
   if (!trajectory_active_) {
     trajectory_active_ = true;
     trajectory_start_time_ = point.timestamp;
@@ -540,7 +567,11 @@ void JointImpedanceExampleController::addTrajectoryPoint(
       last_interpolated_position_[i] = position[i];
       last_interpolated_velocity_[i] = velocity[i];
     }
+    ROS_INFO("Trajectory started! Set trajectory_active_ = true");
   }
+  ROS_INFO("Trajectory active after adding point: %s", trajectory_active_ ? "true" : "false");
+  ROS_INFO("Added trajectory point: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+           position[0], position[1], position[2], position[3], position[4], position[5], position[6]);
   
   // Limit buffer size to prevent memory issues
   const size_t max_buffer_size = 100;
@@ -615,10 +646,15 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
 void JointImpedanceExampleController::clearTrajectory() {
   trajectory_buffer_.clear();
   trajectory_active_ = false;
+  ROS_INFO("Trajectory active after clearTrajectory: %s", trajectory_active_ ? "true" : "false");
   current_trajectory_index_ = 0;
 }
 
 bool JointImpedanceExampleController::isTrajectoryActive() const {
+  
+  //ROS info for debugging trajectory status
+  ROS_INFO("isTrajectoryActive() called: trajectory_active_ = %s, buffer size = %zu",
+    trajectory_active_ ? "true" : "false", trajectory_buffer_.empty() ? 0 : trajectory_buffer_.size());
   return trajectory_active_ && !trajectory_buffer_.empty();
 }
 

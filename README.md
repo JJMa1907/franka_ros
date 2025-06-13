@@ -149,3 +149,36 @@ grasp_pub.publish(grasp_goal)
 如果你还想通过 Python 设置成循环控制或动态控制闭合力度宽度，也可以更灵活扩展。需要我帮你做一个完整可运行的 ROS 节点示例吗？
 
 [1]: https://stackoverflow.com/questions/76947858/publishing-to-a-ros-topic-to-open-robot-hand-through-python-script?utm_source=chatgpt.com "Publishing to a ROS topic to open robot hand through Python script"
+
+
+[ INFO] [1749818599.599606724]: Received joint command: [0.080, -0.151, -0.015, -2.508, -0.037, 2.326, 0.850]
+[ INFO] [1749818599.599642802]: Trajectory active before adding point: false
+[ INFO] [1749818599.599656520]: Trajectory started! Set trajectory_active_ = true
+[ INFO] [1749818599.599697803]: Trajectory active after adding point: true
+[ INFO] [1749818599.599713004]: Added trajectory point: [0.080, -0.151, -0.015, -2.508, -0.037, 2.326, 0.850]
+[ INFO] [1749818600.531781839]: Debug: use_external_command_=true, external_command_received_=true, isTrajectoryActive()=false
+[ INFO] [1749818600.531826412]: Debug: trajectory_buffer_.size()=1, trajectory_active_=false
+[ INFO] [1749818600.531845839]: Debug: No active trajectory, maintaining current position: 0.080
+[ INFO] [1749818600.531857009]: Target joints: [0.080, -0.150, -0.015, -2.508, -0.037, 2.326, 0.810]
+[ INFO] [1749818600.531880575]: Current joints: [0.080, -0.150, -0.015, -2.508, -0.037, 2.326, 0.810]
+[ INFO] [1749818600.531904815]: Joint errors: [-0.000, -0.000, 0.000, -0.000, 0.000, 0.000, -0.000]
+[ INFO] [1749818600.531916655]: Calculated torques: [-0.012, -0.011, 0.006, -0.028, -0.001, 0.011, -0.000]
+[ INFO] [1749818600.531926854]: Saturated torques: [-0.012, -0.011, 0.006, -0.028, -0.001, 0.011, -0.000]
+
+
+
+[ INFO] [1749822330.231676026]: Debug: use_external_command_=true, external_command_received_=true, isTrajectoryActive()=false
+[ INFO] [1749822330.231689744]: Debug: trajectory_buffer_.size()=1, trajectory_active_=false
+[ INFO] [1749822330.231704597]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231726486]: Debug: No active trajectory, maintaining current position: 0.080
+[ INFO] [1749822330.231740080]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231754332]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231767955]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231782182]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231796173]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231810468]: isTrajectoryActive() called: trajectory_active_ = false, buffer size = 1
+[ INFO] [1749822330.231829554]: Target joints: [0.080, -0.131, -0.015, -2.508, -0.037, 2.326, 0.810]
+[ INFO] [1749822330.231846425]: Current joints: [0.080, -0.131, -0.015, -2.508, -0.037, 2.326, 0.810]
+[ INFO] [1749822330.231863633]: Joint errors: [-0.000, -0.000, -0.000, 0.000, -0.000, 0.000, -0.000]
+[ INFO] [1749822330.231879795]: Calculated torques: [0.007, 0.001, -0.007, -0.015, -0.005, -0.005, 0.003]
+[ INFO] [1749822330.231897302]: Saturated torques: [0.007, 0.001, -0.007, -0.015, -0.005, -0.005, 0.003]
