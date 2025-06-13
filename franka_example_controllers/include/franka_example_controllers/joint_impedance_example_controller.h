@@ -67,6 +67,9 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
   // ROS subscriber for joint commands
   ros::Subscriber joint_command_sub_;
   
+  // ROS subscriber for trajectory commands (deoxys-compatible)
+  ros::Subscriber trajectory_command_sub_;
+  
   // External command variables
   std::array<double, 7> q_desired_target_;
   bool use_external_command_;

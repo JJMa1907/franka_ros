@@ -21,6 +21,7 @@ find_package(catkin REQUIRED COMPONENTS
   realtime_tools
   roscpp
   rospy
+  std_msgs
   urdf
   visualization_msgs
 )
@@ -40,7 +41,10 @@ add_message_files(FILES
   JointTrajectoryPoint.msg
 )
 
-generate_messages()
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
 
 generate_dynamic_reconfigure_options(
   cfg/compliance_param.cfg
