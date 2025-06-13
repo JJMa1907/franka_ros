@@ -181,8 +181,6 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
           << ex.what());
       return false;
     }
-  } else {
-    ROS_INFO("JointImpedanceExampleController: External command mode enabled - skipping Cartesian interface");
   }
 
   auto* effort_joint_interface = robot_hw->get<hardware_interface::EffortJointInterface>();
@@ -210,8 +208,6 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   }
 
   external_command_received_ = false;
-
-  // Initialize trajectory interpolation variables
   trajectory_active_ = false;
   current_trajectory_index_ = 0;
   trajectory_start_time_ = 0.0;
@@ -263,19 +259,12 @@ void JointImpedanceExampleController::jointCommandCallback(
     target_velocity[i] = 0.0; // Default velocity for single point commands
   }
   
-  // Log the received joint command at debug level
-  ROS_DEBUG("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-           target_position[0], target_position[1], target_position[2],
-           target_position[3], target_position[4], target_position[5], target_position[6]);
-  
   // Save the target position for when the trajectory is complete
   q_desired_target_ = target_position;
   
   // Add trajectory point with full trajectory interpolation (deoxys-compatible)
   addTrajectoryPoint(target_position, target_velocity);
   external_command_received_ = true;
-  
-  ROS_DEBUG("Added trajectory point to buffer. Buffer size: %zu", trajectory_buffer_.size());
 }
 
 void JointImpedanceExampleController::starting(const ros::Time& time) {
@@ -301,7 +290,6 @@ void JointImpedanceExampleController::starting(const ros::Time& time) {
       last_interpolated_position_[i] = robot_state.q[i];
       last_interpolated_velocity_[i] = robot_state.dq[i];
     }
-    ROS_INFO("JointImpedanceExampleController: Starting in external command mode");
   }
   
   // Initialize trajectory interpolation
@@ -545,8 +533,6 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   
   for (size_t i = 0; i < 7; ++i) {
     double error = std::abs(interpolated_position[i] - target_point.position[i]);
-    
-    // Actual tolerance check logic
     if (error > position_tolerance) {
       reached_target = false;
       break;
