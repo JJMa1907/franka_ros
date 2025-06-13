@@ -47,18 +47,40 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     return false;
   }
 
-  if (!node_handle.getParam("k_gains", k_gains_) || k_gains_.size() != 7) {
-    ROS_ERROR(
-        "JointImpedanceExampleController:  Invalid or no k_gain parameters provided, aborting "
-        "controller init!");
-    return false;
+  // Initialize joint stiffness and damping with default values from deoxys config
+  std::vector<double> joint_kp = {300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0};
+  std::vector<double> joint_kd = {20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0};
+  std::vector<double> max_delta_q = {0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06};
+  
+  // Try to get parameters from param server if available
+  node_handle.getParam("joint_kp", joint_kp);
+  node_handle.getParam("joint_kd", joint_kd);
+  node_handle.getParam("max_delta_q", max_delta_q);
+
+  // Use joint_kp and joint_kd as k_gains and d_gains
+  k_gains_.resize(7);
+  d_gains_.resize(7);
+  for (size_t i = 0; i < 7; ++i) {
+    k_gains_[i] = joint_kp[i];
+    d_gains_[i] = joint_kd[i];
   }
 
-  if (!node_handle.getParam("d_gains", d_gains_) || d_gains_.size() != 7) {
-    ROS_ERROR(
-        "JointImpedanceExampleController:  Invalid or no d_gain parameters provided, aborting "
-        "controller init!");
-    return false;
+  // State estimation parameters (exponential smoothing)
+  alpha_q_ = 0.9;
+  alpha_dq_ = 0.9;
+  node_handle.getParam("alpha_q", alpha_q_);
+  node_handle.getParam("alpha_dq", alpha_dq_);
+
+  // Trajectory interpolation parameters
+  time_fraction_ = 1.0;
+  node_handle.getParam("time_fraction", time_fraction_);
+
+  // Initialize smoothed state variables
+  position_smoothed_.fill(0.0);
+  velocity_smoothed_.fill(0.0);
+  max_delta_q_.resize(7);
+  for (size_t i = 0; i < 7; ++i) {
+    max_delta_q_[i] = max_delta_q[i];
   }
 
   double publish_rate(30.0);
@@ -77,6 +99,34 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   if (!node_handle.getParam("use_external_command", use_external_command_)) {
     ROS_INFO_STREAM("JointImpedanceExampleController: use_external_command not found. Defaulting to "
                     << use_external_command_);
+  }
+
+  // Check if delta mode should be enabled (deoxys is_delta config)
+  if (!node_handle.getParam("is_delta", is_delta_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: is_delta not found. Defaulting to "
+                    << is_delta_);
+  }
+
+  // Initialize joint limits (deoxys-compatible)
+  // Default Franka Panda joint limits
+  joint_limits_upper_ = {2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973};
+  joint_limits_lower_ = {-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973};
+  
+  std::vector<double> upper_limits, lower_limits;
+  if (node_handle.getParam("joint_limits_upper", upper_limits) && upper_limits.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) {
+      joint_limits_upper_[i] = upper_limits[i];
+    }
+  }
+  if (node_handle.getParam("joint_limits_lower", lower_limits) && lower_limits.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) {
+      joint_limits_lower_[i] = lower_limits[i];
+    }
+  }
+  
+  if (!node_handle.getParam("joint_limit_margin", joint_limit_margin_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: joint_limit_margin not found. Defaulting to "
+                    << joint_limit_margin_);
   }
 
   auto* model_interface = robot_hw->get<franka_hw::FrankaModelInterface>();
@@ -153,6 +203,8 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   torques_publisher_.init(node_handle, "torque_comparison", 1);
   joint_command_sub_ = node_handle.subscribe(
     "joint_command", 1, &JointImpedanceExampleController::jointCommandCallback, this);
+  trajectory_command_sub_ = node_handle.subscribe(
+    "trajectory_command", 1, &JointImpedanceExampleController::trajectoryCommandCallback, this);
 
   // Initialize external command variables
   for (size_t i = 0; i < 7; ++i) {
@@ -160,6 +212,19 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   }
 
   external_command_received_ = false;
+
+  // Initialize trajectory interpolation variables
+  trajectory_active_ = false;
+  current_trajectory_index_ = 0;
+  trajectory_start_time_ = 0.0;
+  trajectory_buffer_.clear();
+  
+  // Initialize max delta position per control cycle (from deoxys max_delta_q config)
+  for (size_t i = 0; i < 7; ++i) {
+    max_delta_position_per_cycle_[i] = max_delta_q[i]; // 0.06 rad per cycle default
+    last_interpolated_position_[i] = 0.0;
+    last_interpolated_velocity_[i] = 0.0;
+  }
 
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
 
@@ -174,19 +239,33 @@ void JointImpedanceExampleController::jointCommandCallback(
     return;
   }
   
-  for (size_t i = 0; i < 7; ++i) {
-    q_desired_target_[i] = msg->data[i];
-  }
-  
   if (use_external_command_) {
+    // Convert ROS message to trajectory point
+    std::array<double, 7> target_position;
+    
+    if (is_delta_) {
+      // Delta mode: add to current position (deoxys-compatible)
+      for (size_t i = 0; i < 7; ++i) {
+        target_position[i] = last_interpolated_position_[i] + msg->data[i];
+      }
+    } else {
+      // Absolute mode: use direct position
+      for (size_t i = 0; i < 7; ++i) {
+        target_position[i] = msg->data[i];
+      }
+    }
+    
+    // Add trajectory point with LINEAR_JOINT_POSITION interpolation
+    addTrajectoryPoint(target_position);
     external_command_received_ = true;
-    ROS_INFO("Received external joint command");
+    
+    ROS_DEBUG("Added trajectory point to buffer. Buffer size: %zu", trajectory_buffer_.size());
   } else {
     ROS_WARN("Received joint command but external command mode is disabled");
   }
 }
 
-void JointImpedanceExampleController::starting(const ros::Time& /*time*/) {
+void JointImpedanceExampleController::starting(const ros::Time& time) {
   if (cartesian_pose_handle_) {
     initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
     
@@ -194,15 +273,29 @@ void JointImpedanceExampleController::starting(const ros::Time& /*time*/) {
     franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();
     for (size_t i = 0; i < 7; ++i) {
       q_desired_target_[i] = robot_state.q[i];
+      position_smoothed_[i] = robot_state.q[i];
+      velocity_smoothed_[i] = robot_state.dq[i];
+      last_interpolated_position_[i] = robot_state.q[i];
+      last_interpolated_velocity_[i] = robot_state.dq[i];
     }
   } else {
     // In external command mode, initialize target positions to current joint positions
     franka::RobotState robot_state = state_handle_->getRobotState();
     for (size_t i = 0; i < 7; ++i) {
       q_desired_target_[i] = robot_state.q[i];
+      position_smoothed_[i] = robot_state.q[i];
+      velocity_smoothed_[i] = robot_state.dq[i];
+      last_interpolated_position_[i] = robot_state.q[i];
+      last_interpolated_velocity_[i] = robot_state.dq[i];
     }
     ROS_INFO("JointImpedanceExampleController: Starting in external command mode");
   }
+  
+  // Initialize trajectory interpolation
+  trajectory_start_time_ = time.toSec();
+  trajectory_active_ = false;
+  current_trajectory_index_ = 0;
+  clearTrajectory();
 }
 
 void JointImpedanceExampleController::update(const ros::Time& /*time*/,
@@ -240,6 +333,12 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   // Note: When using external command mode, we only use joint torque control
   // and don't send Cartesian pose commands to avoid conflicts
   
+  // Apply exponential smoothing to measurements for state estimation
+  for (size_t i = 0; i < 7; i++) {
+    position_smoothed_[i] = alpha_q_ * robot_state.q[i] + (1.0 - alpha_q_) * position_smoothed_[i];
+    velocity_smoothed_[i] = alpha_dq_ * robot_state.dq[i] + (1.0 - alpha_dq_) * velocity_smoothed_[i];
+  }
+  
   double alpha = 0.99;
   for (size_t i = 0; i < 7; i++) {
     dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];
@@ -250,24 +349,55 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
 
     double q_target = 0.0;
     double dq_target = 0.0;
+    
+    // Use smoothed positions for control (deoxys-compatible state estimation)
+    double current_q = position_smoothed_[i];
+    double current_dq = velocity_smoothed_[i];
+    
     if (use_external_command_ && external_command_received_) {
-      q_target = q_desired_target_[i];
-      dq_target = 0.0;
+      // Use trajectory interpolation for external commands (deoxys-compatible)
+      if (isTrajectoryActive()) {
+        std::array<double, 7> target_velocity;
+        std::array<double, 7> interpolated_position = interpolateTrajectory(ros::Time::now().toSec(), target_velocity);
+        q_target = interpolated_position[i];
+        dq_target = target_velocity[i];
+      } else {
+        // No active trajectory, maintain current position
+        q_target = current_q;
+        dq_target = 0.0;
+      }
     }
     else if (use_external_command_ && !external_command_received_) {
       // When external command mode is enabled but no command received yet,
       // maintain current position
-      q_target = robot_state.q[i];
+      q_target = current_q;
       dq_target = 0.0;
     }
     else {
+      // Internal trajectory mode
       q_target = robot_state.q_d[i];
       dq_target = robot_state.dq_d[i];
     }
     
-    tau_d_calculated[i] = coriolis_factor_ * coriolis[i] +
-                          k_gains_[i] * (q_target - robot_state.q[i]) +
-                          d_gains_[i] * (dq_target - dq_filtered_[i]);
+    // Calculate position error (deoxys-compatible)
+    double position_error = q_target - current_q;
+    
+    // PD control calculation (matching deoxys equation)
+    tau_d_calculated[i] = k_gains_[i] * position_error - d_gains_[i] * current_dq;
+    
+    // Joint limit protection (deoxys-compatible)
+    double dist_to_upper = joint_limits_upper_[i] - current_q;
+    double dist_to_lower = current_q - joint_limits_lower_[i];
+    
+    if (dist_to_upper < joint_limit_margin_ && tau_d_calculated[i] > 0.0) {
+      tau_d_calculated[i] = 0.0;  // Disable positive torque near upper limit
+    }
+    if (dist_to_lower < joint_limit_margin_ && tau_d_calculated[i] < 0.0) {
+      tau_d_calculated[i] = 0.0;  // Disable negative torque near lower limit
+    }
+    
+    // Add coriolis compensation
+    tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
   }
 
   // Maximum torque difference with a sampling rate of 1 kHz. The maximum torque rate is
@@ -332,6 +462,164 @@ std::array<double, 7> JointImpedanceExampleController::saturateTorqueRate(
     tau_d_saturated[i] = tau_J_d[i] + std::max(std::min(difference, kDeltaTauMax), -kDeltaTauMax);
   }
   return tau_d_saturated;
+}
+
+// Trajectory interpolation methods (deoxys-compatible implementation)
+void JointImpedanceExampleController::trajectoryCommandCallback(
+    const franka_example_controllers::JointTrajectoryCommandConstPtr& msg) {
+  
+  if (!use_external_command_) {
+    ROS_WARN("Received trajectory command but external command mode is disabled");
+    return;
+  }
+  
+  // Clear existing trajectory
+  clearTrajectory();
+  
+  // Update configuration from message
+  if (msg->time_fraction > 0.1) {
+    time_fraction_ = msg->time_fraction;
+  }
+  
+  if (msg->max_delta_q.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) {
+      max_delta_position_per_cycle_[i] = msg->max_delta_q[i];
+    }
+  }
+  
+  // Add all trajectory points
+  for (const auto& point : msg->points) {
+    if (point.position.size() != 7) {
+      ROS_ERROR("Trajectory point must have 7 joint positions");
+      continue;
+    }
+    
+    std::array<double, 7> position, velocity;
+    for (size_t i = 0; i < 7; ++i) {
+      if (msg->is_delta) {
+        // Delta mode: add to current position
+        position[i] = last_interpolated_position_[i] + point.position[i];
+      } else {
+        // Absolute mode
+        position[i] = point.position[i];
+      }
+      
+      if (point.velocity.size() == 7) {
+        velocity[i] = point.velocity[i];
+      } else {
+        velocity[i] = 0.0;
+      }
+    }
+    
+    addTrajectoryPoint(position, velocity);
+  }
+  
+  external_command_received_ = true;
+  ROS_INFO("Received trajectory with %zu points", msg->points.size());
+}
+
+void JointImpedanceExampleController::addTrajectoryPoint(
+    const std::array<double, 7>& position, 
+    const std::array<double, 7>& velocity) {
+  
+  TrajectoryPoint point;
+  point.position = position;
+  point.velocity = velocity;
+  point.timestamp = ros::Time::now().toSec();
+  
+  trajectory_buffer_.push_back(point);
+  
+  // Start trajectory if this is the first point
+  if (!trajectory_active_) {
+    trajectory_active_ = true;
+    trajectory_start_time_ = point.timestamp;
+    current_trajectory_index_ = 0;
+    
+    // Initialize interpolated position to current position
+    for (size_t i = 0; i < 7; ++i) {
+      last_interpolated_position_[i] = position[i];
+      last_interpolated_velocity_[i] = velocity[i];
+    }
+  }
+  
+  // Limit buffer size to prevent memory issues
+  const size_t max_buffer_size = 100;
+  if (trajectory_buffer_.size() > max_buffer_size) {
+    trajectory_buffer_.erase(trajectory_buffer_.begin());
+  }
+}
+
+std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
+    double current_time, 
+    std::array<double, 7>& target_velocity) {
+  
+  std::array<double, 7> interpolated_position = last_interpolated_position_;
+  target_velocity = last_interpolated_velocity_;
+  
+  if (!trajectory_active_ || trajectory_buffer_.empty()) {
+    return interpolated_position;
+  }
+  
+  // Apply time_fraction scaling (deoxys-compatible)
+  double scaled_time = (current_time - trajectory_start_time_) * time_fraction_;
+  double target_time = trajectory_start_time_ + scaled_time;
+  
+  // Find the current target point
+  if (current_trajectory_index_ < trajectory_buffer_.size()) {
+    const TrajectoryPoint& target_point = trajectory_buffer_[current_trajectory_index_];
+    
+    // LINEAR_JOINT_POSITION interpolation implementation
+    for (size_t i = 0; i < 7; ++i) {
+      double position_error = target_point.position[i] - last_interpolated_position_[i];
+      
+      // Apply max_delta_q constraint (from deoxys config)
+      double max_delta = max_delta_position_per_cycle_[i];
+      double delta_position = std::max(std::min(position_error, max_delta), -max_delta);
+      
+      // Linear interpolation with velocity constraint
+      interpolated_position[i] = last_interpolated_position_[i] + delta_position;
+      target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
+      
+      // Apply velocity smoothing
+      target_velocity[i] = std::max(std::min(target_velocity[i], 0.5), -0.5); // rad/s limit
+    }
+    
+    // Check if we've reached the target point (within tolerance)
+    bool reached_target = true;
+    const double position_tolerance = 0.001; // 1mm tolerance
+    for (size_t i = 0; i < 7; ++i) {
+      if (std::abs(interpolated_position[i] - target_point.position[i]) > position_tolerance) {
+        reached_target = false;
+        break;
+      }
+    }
+    
+    if (reached_target) {
+      // Move to next trajectory point
+      current_trajectory_index_++;
+      if (current_trajectory_index_ >= trajectory_buffer_.size()) {
+        // Trajectory completed
+        trajectory_active_ = false;
+        ROS_DEBUG("Trajectory completed");
+      }
+    }
+  }
+  
+  // Update last interpolated state
+  last_interpolated_position_ = interpolated_position;
+  last_interpolated_velocity_ = target_velocity;
+  
+  return interpolated_position;
+}
+
+void JointImpedanceExampleController::clearTrajectory() {
+  trajectory_buffer_.clear();
+  trajectory_active_ = false;
+  current_trajectory_index_ = 0;
+}
+
+bool JointImpedanceExampleController::isTrajectoryActive() const {
+  return trajectory_active_ && !trajectory_buffer_.empty();
 }
 
 }  // namespace franka_example_controllers

@@ -62,3 +62,90 @@ rostopic pub /joint_impedance_example_controller/joint_command std_msgs/Float64M
 ```
 ## some issues may 
 只出现话题没有消息，请检查/etc/hosts设置
+
+
+修改`franka_example_controllers/src/joint_impedance_example_controller.cpp`，使这个基于ROS实现的程序完成`deoxys_control/deoxys/franka-interface/src/franka_control_node.cpp`在`deoxys_control/deoxys/config/joint-impedance-controller.yml`配置下的功能，函数默认参数和配置文件保持一致，
+
+
+## gripper control
+在 ROS 中，你可以直接通过 **发布消息到夹爪的 Move/Grasp 目标 topic** 来控制 Franka gripper 而无需 action client。主要的 topic 有：
+
+---
+
+## 🎯 使用 rostopic 发布命令
+
+### 打开夹爪（Move）
+
+```bash
+rostopic pub --once /franka_gripper/move/goal franka_gripper/MoveActionGoal \
+"goal:
+  width: 0.08
+  speed: 0.1"
+```
+
+### 抓取（Grasp）
+
+```bash
+rostopic pub --once /franka_gripper/grasp/goal franka_gripper/GraspActionGoal \
+"goal:
+  width: 0.03
+  epsilon:
+    inner: 0.005
+    outer: 0.005
+  speed: 0.1
+  force: 5.0"
+```
+
+这种方式可以直接通过 topic 模拟 action，但依旧需要 action message 类型 ([stackoverflow.com][1])。
+
+---
+
+## 🧰 在 Python 脚本中发布 topic 控制
+
+你可以通过 `rospy.Publisher`，发布消息到与 `rostopic pub` 相同的 topic：
+
+```python
+import rospy
+from franka_gripper.msg import MoveActionGoal, GraspActionGoal
+
+rospy.init_node('gripper_topic_control')
+
+# Publisher for open
+move_pub = rospy.Publisher('/franka_gripper/move/goal', MoveActionGoal, queue_size=1)
+# Publisher for grasp
+grasp_pub = rospy.Publisher('/franka_gripper/grasp/goal', GraspActionGoal, queue_size=1)
+
+# 等待 publisher 建立连接
+rospy.sleep(0.5)
+
+# 打开
+move_goal = MoveActionGoal()
+move_goal.goal.width = 0.08
+move_goal.goal.speed = 0.1
+move_pub.publish(move_goal)
+
+rospy.sleep(1.0)
+
+# 抓取
+grasp_goal = GraspActionGoal()
+grasp_goal.goal.width = 0.03
+grasp_goal.goal.epsilon.inner = 0.005
+grasp_goal.goal.epsilon.outer = 0.005
+grasp_goal.goal.speed = 0.1
+grasp_goal.goal.force = 5.0
+grasp_pub.publish(grasp_goal)
+```
+
+与命令行一致，只是换成 Python 脚本自动化运行 ([stackoverflow.com][1])。
+
+---
+
+## ✅ 小结
+
+* 发布 `franka_gripper/MoveActionGoal` 到 `/franka_gripper/move/goal` 打开夹爪。
+* 发布 `franka_gripper/GraspActionGoal` 到 `/franka_gripper/grasp/goal` 抓取物体。
+* `--once` 发布一次即可，Python 可使用 `rospy.Publisher` 实现相同控制效果。
+
+如果你还想通过 Python 设置成循环控制或动态控制闭合力度宽度，也可以更灵活扩展。需要我帮你做一个完整可运行的 ROS 节点示例吗？
+
+[1]: https://stackoverflow.com/questions/76947858/publishing-to-a-ros-topic-to-open-robot-hand-through-python-script?utm_source=chatgpt.com "Publishing to a ROS topic to open robot hand through Python script"

@@ -60,6 +60,24 @@ joint_impedance_example_controller:
         - $(arg arm_id)_joint5
         - $(arg arm_id)_joint6
         - $(arg arm_id)_joint7
+    # Deoxys-compatible joint impedance parameters
+    joint_kp:
+        - 300.0
+        - 300.0 
+        - 300.0
+        - 300.0 
+        - 225.0 
+        - 450.0
+        - 150.0
+    joint_kd:
+        - 20.0
+        - 20.0
+        - 20.0
+        - 20.0
+        - 7.5
+        - 15.0
+        - 5.0
+    # Legacy k_gains and d_gains for backward compatibility
     k_gains:
         - 300.0
         - 300.0 
@@ -76,10 +94,30 @@ joint_impedance_example_controller:
         - 7.5
         - 15.0
         - 5.0
+    # Deoxys trajectory interpolation parameters
+    max_delta_q:
+        - 0.06
+        - 0.06
+        - 0.06
+        - 0.06
+        - 0.06
+        - 0.06
+        - 0.06
+    time_fraction: 1.0
+    # Deoxys state estimation parameters (exponential smoothing)
+    alpha_q: 0.9
+    alpha_dq: 0.9
+    # Deoxys command mode parameters
+    is_delta: false
+    # Joint limit protection parameters
+    joint_limit_margin: 0.1
+    joint_limits_upper: [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973]
+    joint_limits_lower: [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973]
+    # Standard controller parameters
     radius: 0.1
     acceleration_time: 2.0
     vel_max: 0.15
-    publish_rate: 10.0
+    publish_rate: 30.0
     coriolis_factor: 1.0
     use_external_command: true
 
