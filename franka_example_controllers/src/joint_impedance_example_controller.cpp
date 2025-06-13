@@ -239,33 +239,38 @@ void JointImpedanceExampleController::jointCommandCallback(
     return;
   }
   
-  if (use_external_command_) {
-    // Convert ROS message to trajectory point
-    std::array<double, 7> target_position;
-    
+  if (!use_external_command_) {
+    ROS_WARN("Received joint command but external command mode is disabled");
+    return;
+  }
+  
+  // Clear existing trajectory (deoxys-compatible behavior)
+  clearTrajectory();
+  
+  // Convert ROS message to trajectory point with full trajectory processing
+  std::array<double, 7> target_position, target_velocity;
+  
+  for (size_t i = 0; i < 7; ++i) {
     if (is_delta_) {
       // Delta mode: add to current position (deoxys-compatible)
-      for (size_t i = 0; i < 7; ++i) {
-        target_position[i] = last_interpolated_position_[i] + msg->data[i];
-      }
+      target_position[i] = last_interpolated_position_[i] + msg->data[i];
     } else {
       // Absolute mode: use direct position
-      for (size_t i = 0; i < 7; ++i) {
-        target_position[i] = msg->data[i];
-      }
+      target_position[i] = msg->data[i];
     }
-    // ros info the received joint command
-    ROS_INFO("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-             target_position[0], target_position[1], target_position[2],
-             target_position[3], target_position[4], target_position[5], target_position[6]);
-    // Add trajectory point with LINEAR_JOINT_POSITION interpolation
-    addTrajectoryPoint(target_position);
-    external_command_received_ = true;
-    
-    ROS_DEBUG("Added trajectory point to buffer. Buffer size: %zu", trajectory_buffer_.size());
-  } else {
-    ROS_WARN("Received joint command but external command mode is disabled");
+    target_velocity[i] = 0.0; // Default velocity for single point commands
   }
+  
+  // Log the received joint command
+  ROS_INFO("Received joint command: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+           target_position[0], target_position[1], target_position[2],
+           target_position[3], target_position[4], target_position[5], target_position[6]);
+  
+  // Add trajectory point with full trajectory interpolation (deoxys-compatible)
+  addTrajectoryPoint(target_position, target_velocity);
+  external_command_received_ = true;
+  
+  ROS_DEBUG("Added trajectory point to buffer. Buffer size: %zu", trajectory_buffer_.size());
 }
 
 void JointImpedanceExampleController::starting(const ros::Time& time) {

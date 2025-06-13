@@ -148,17 +148,25 @@ if (control_msg_.goal().is_delta()) {
 ### Enhanced ROS Implementation
 ```cpp
 void jointCommandCallback(const std_msgs::Float64MultiArrayConstPtr& msg) {
+  // Clear existing trajectory (deoxys-compatible behavior)
+  clearTrajectory();
+  
   for (size_t i = 0; i < 7; ++i) {
     if (is_delta_) {
-      // Add delta to current smoothed position
-      q_desired_target_[i] = position_smoothed_[i] + msg->data[i];
+      // Add delta to current interpolated position (deoxys-compatible)
+      target_position[i] = last_interpolated_position_[i] + msg->data[i];
     } else {
       // Absolute position command
-      q_desired_target_[i] = msg->data[i];
+      target_position[i] = msg->data[i];
     }
   }
+  
+  // Use full trajectory interpolation system for single commands
+  addTrajectoryPoint(target_position, target_velocity);
 }
 ```
+
+**Key Enhancement**: Joint commands now use the same trajectory interpolation system as complex trajectory commands, providing consistent deoxys-compatible behavior.
 
 **Status**: ✅ **Functionally Equivalent**
 
