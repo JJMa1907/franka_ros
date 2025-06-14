@@ -1,0 +1,45 @@
+<?xml version="1.0" ?>
+<launch>
+  <!-- Robot and Connection Parameters -->
+  <arg name="robot" default="panda" doc="choose your robot. Possible values: [panda, fr3]"/>
+  <arg name="robot_ip" default="robot.franka.de" doc="IP address of the robot"/>
+  <arg name="arm_id" default="$(arg robot)" doc="Name of the robot arm"/>
+  <arg name="load_gripper" default="true" doc="Load and use the gripper if present"/>
+  
+  <!-- Configuration Parameters -->
+  <arg name="safe_mode" default="true" doc="Use safer controller parameters to prevent power limit violations"/>
+  <arg name="use_rviz" default="true" doc="Launch RViz for visualization"/>
+  <arg name="use_interactive_marker" default="false" doc="Use interactive marker for control"/>
+
+  <!-- Launch franka_control -->
+  <include file="$(find franka_control)/launch/franka_control.launch">
+    <arg name="robot" value="$(arg robot)"/>
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="arm_id" value="$(arg arm_id)"/>
+    <arg name="load_gripper" value="$(arg load_gripper)"/>
+  </include>
+
+  <!-- Load controller configuration based on safe_mode flag -->
+  <group if="$(arg safe_mode)">
+    <rosparam command="load" file="$(find franka_example_controllers)/config/joint_impedance_safe.yaml" subst_value="true" />
+    <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" args="joint_impedance_example_controller"/>
+  </group>
+  
+  <group unless="$(arg safe_mode)">
+    <rosparam command="load" file="$(find franka_example_controllers)/config/franka_example_controllers.yaml" subst_value="true" />
+    <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" args="joint_impedance_example_controller"/>
+  </group>
+  
+  <!-- RViz visualization -->
+  <group if="$(arg use_rviz)">
+    <node pkg="rviz" type="rviz" output="screen" name="rviz" args="-d $(find franka_example_controllers)/launch/robot.rviz -f $(arg arm_id)_link0 --splash-screen $(find franka_visualization)/splash.png"/>
+  </group>
+  
+  <!-- Interactive marker for control -->
+  <group if="$(arg use_interactive_marker)">
+    <node name="interactive_marker" pkg="franka_example_controllers" type="interactive_marker.py" required="false" output="screen">
+      <param name="link_name" value="$(arg arm_id)_link0" />
+      <remap from="equilibrium_pose" to="/joint_impedance_example_controller/equilibrium_pose" />
+    </node>
+  </group>
+</launch>

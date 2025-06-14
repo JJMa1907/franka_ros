@@ -1,0 +1,43 @@
+# Joint Impedance Controller Configuration with safer defaults to prevent power_limit_violation
+
+joint_impedance_example_controller:
+    type: franka_example_controllers/JointImpedanceExampleController
+    arm_id: $(arg arm_id)
+    joint_names:
+        - $(arg arm_id)_joint1
+        - $(arg arm_id)_joint2
+        - $(arg arm_id)_joint3
+        - $(arg arm_id)_joint4
+        - $(arg arm_id)_joint5
+        - $(arg arm_id)_joint6
+        - $(arg arm_id)_joint7
+    
+    # Joint impedance parameters - reduced for safety
+    joint_kp: [300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0]
+    joint_kd: [20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0]
+    max_delta_q: [0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04]
+    
+    # State estimation parameters (exponential smoothing)
+    alpha_q: 0.9
+    alpha_dq: 0.9
+    
+    # Trajectory interpolation parameter
+    time_fraction: 1.0
+    
+    # Power and torque limits
+    power_limit: 50.0       # Maximum mechanical power allowed (W)
+    tau_limit: 87.0         # Maximum joint torque (Nm)
+    
+    # Controller startup parameters
+    startup_duration: 1.0   # Duration in seconds for controller startup
+    
+    # Joint limit protection
+    joint_limit_margin: 0.1
+    
+    # Original franka_example_controllers parameters
+    radius: 0.1
+    acceleration_time: 2.0
+    vel_max: 0.1           # Reduced max velocity
+    publish_rate: 30.0
+    coriolis_factor: 1.0
+    use_external_command: true

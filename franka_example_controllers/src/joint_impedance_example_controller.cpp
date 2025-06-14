@@ -74,6 +74,11 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   // Trajectory interpolation parameters
   time_fraction_ = 1.0;
   node_handle.getParam("time_fraction", time_fraction_);
+  
+  // Controller startup parameters
+  node_handle.getParam("startup_duration", startup_duration_);
+  
+  // We'll load power and torque limits later with proper error handling
 
   // Initialize smoothed state variables
   position_smoothed_.fill(0.0);
@@ -127,6 +132,29 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   if (!node_handle.getParam("joint_limit_margin", joint_limit_margin_)) {
     ROS_INFO_STREAM("JointImpedanceExampleController: joint_limit_margin not found. Defaulting to "
                     << joint_limit_margin_);
+  }
+
+  // Load power and torque limits for power_limit_violation prevention
+  if (!node_handle.getParam("power_limit", power_limit_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: power_limit not found. Defaulting to "
+                    << power_limit_);
+  }
+  
+  // Set more conservative power limit during startup
+  power_limit_startup_ = power_limit_ * 0.7; // 70% of normal power limit during startup
+  if (!node_handle.getParam("power_limit_startup", power_limit_startup_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: power_limit_startup not found. Defaulting to "
+                    << power_limit_startup_);
+  }
+  
+  if (!node_handle.getParam("tau_limit", tau_limit_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: tau_limit not found. Defaulting to "
+                    << tau_limit_);
+  }
+  
+  if (!node_handle.getParam("startup_duration", startup_duration_)) {
+    ROS_INFO_STREAM("JointImpedanceExampleController: startup_duration not found. Defaulting to "
+                    << startup_duration_);
   }
 
   auto* model_interface = robot_hw->get<franka_hw::FrankaModelInterface>();
@@ -298,10 +326,17 @@ void JointImpedanceExampleController::starting(const ros::Time& time) {
   current_trajectory_index_ = 0;
   trajectory_completion_countdown_ = 0;
   clearTrajectory();
+  
+  // Reset startup phase for smooth transition
+  startup_phase_ = true;
+  startup_time_ = ros::Time(0); // Reset to zero to indicate it needs initialization
+  first_command_ = true; // Reset first command flag for ramp-up
 }
 
-void JointImpedanceExampleController::update(const ros::Time& /*time*/,
+void JointImpedanceExampleController::update(const ros::Time& time,
                                              const ros::Duration& period) {
+
+  // Get robot state
   franka::RobotState robot_state;
   if (cartesian_pose_handle_) {
     robot_state = cartesian_pose_handle_->getRobotState();
@@ -309,8 +344,39 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     robot_state = state_handle_->getRobotState();
   }
   
-  std::array<double, 7> coriolis = model_handle_->getCoriolis();
+  // Prevent the shaking issue when starting the controller by implementing a smooth startup
+  // Check if we're in the initial starting phase
   std::array<double, 7> gravity = model_handle_->getGravity();
+  double startup_factor = 1.0;
+  
+  if (startup_phase_) {
+    // Initialize on first update cycle
+    if (startup_time_.isZero()) {
+      startup_time_ = time;
+      for (size_t i = 0; i < 7; ++i) {
+        initial_position_[i] = robot_state.q[i];
+      }
+      ROS_INFO("Joint impedance controller starting with smooth ramp-up over %.1f seconds", startup_duration_);
+    }
+    
+    // Calculate time elapsed since controller start
+    double time_elapsed = (time - startup_time_).toSec();
+    
+    // Use a quadratic ramp-up instead of linear for even smoother transition
+    // This creates a much gentler initial application of force
+    double normalized_time = time_elapsed / startup_duration_;
+    startup_factor = std::min(normalized_time * normalized_time, 1.0);
+    
+    // Exit startup phase after startup_duration_ seconds
+    if (time_elapsed > startup_duration_) {
+      startup_phase_ = false;
+      startup_factor = 1.0;
+      ROS_INFO("Joint impedance controller startup complete");
+    }
+  }
+
+  std::array<double, 7> coriolis = model_handle_->getCoriolis();
+  // gravity is already calculated in the startup section above
 
   if (!use_external_command_ && cartesian_pose_handle_)
   {
@@ -344,6 +410,15 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   double alpha = 0.99;
   for (size_t i = 0; i < 7; i++) {
     dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];
+  }
+
+  // Calculate joint power for monitoring
+  std::array<double, 7> joint_power;
+  double total_power = 0.0;
+  for (size_t i = 0; i < 7; ++i) {
+    // Power = torque * velocity
+    joint_power[i] = std::abs(robot_state.tau_J[i] * robot_state.dq[i]);
+    total_power += joint_power[i];
   }
 
   std::array<double, 7> tau_d_calculated;
@@ -394,8 +469,20 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     // Calculate position error (deoxys-compatible)
     double position_error = q_target - current_q;
     
-    // PD control calculation (matching deoxys equation)
-    tau_d_calculated[i] = k_gains_[i] * position_error - d_gains_[i] * current_dq;
+    // PD control calculation with reduced gains during startup
+    // Apply startup_factor to scale the gains during startup phase
+    double effective_k = startup_phase_ ? k_gains_[i] * startup_factor : k_gains_[i];
+    double effective_d = startup_phase_ ? d_gains_[i] * startup_factor : d_gains_[i];
+    
+    // Calculate the control torque with scaled gains
+    double control_torque = effective_k * position_error - effective_d * current_dq;
+    
+    // Limit the maximum torque magnitude to tau_limit_
+    // The power limiting will be applied in saturateTorqueRate
+    control_torque = std::max(std::min(control_torque, tau_limit_), -tau_limit_);
+    
+    // Final commanded torque
+    tau_d_calculated[i] = control_torque;
     
     // Joint limit protection (deoxys-compatible)
     double dist_to_upper = joint_limits_upper_[i] - current_q;
@@ -408,7 +495,8 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
       tau_d_calculated[i] = 0.0;  // Disable negative torque near lower limit
     }
     
-    // Add coriolis compensation
+    // Always add full coriolis compensation for gravity compensation
+    // This ensures stability even during startup, but scale the control part
     tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
   }
 
@@ -446,10 +534,49 @@ std::array<double, 7> JointImpedanceExampleController::saturateTorqueRate(
     const std::array<double, 7>& tau_d_calculated,
     const std::array<double, 7>& tau_J_d) {  // NOLINT (readability-identifier-naming)
   std::array<double, 7> tau_d_saturated{};
+  
+  // Use variable torque rate limits based on controller state
+  double delta_tau_max = kDeltaTauMax;
+  
+  // For startup phase or first command, use much lower torque rate limit
+  if (startup_phase_ || first_command_) {
+    delta_tau_max = kDeltaTauMax * 0.4; // 40% of normal limit during startup
+    first_command_ = false; // Clear first command flag
+  }
+  
+  // Calculate estimated mechanical power after applying rate limiting
+  double total_power = 0.0;
+  std::array<double, 7> rate_limited_tau;
+  
+  // First calculate rate-limited torques
   for (size_t i = 0; i < 7; i++) {
     double difference = tau_d_calculated[i] - tau_J_d[i];
-    tau_d_saturated[i] = tau_J_d[i] + std::max(std::min(difference, kDeltaTauMax), -kDeltaTauMax);
+    rate_limited_tau[i] = tau_J_d[i] + std::max(std::min(difference, delta_tau_max), -delta_tau_max);
+    
+    // P = τ * ω (torque * angular velocity)
+    total_power += std::abs(rate_limited_tau[i] * dq_filtered_[i]);
   }
+  
+  // Apply additional scaling if power limit would be exceeded
+  double power_scaling = 1.0;
+  
+  // Use more conservative power limit during startup phase
+  double effective_power_limit = startup_phase_ ? power_limit_startup_ : power_limit_;
+  
+  if (total_power > effective_power_limit && total_power > 0) {
+    power_scaling = effective_power_limit / total_power;
+    // Ensure we never scale up, only down
+    power_scaling = std::min(power_scaling, 1.0);
+  }
+  
+  // Apply power scaling to the rate-limited torques
+  for (size_t i = 0; i < 7; i++) {
+    // Apply power scaling to rate_limited torque
+    tau_d_saturated[i] = rate_limited_tau[i] * power_scaling;
+    // Finally apply absolute limit
+    tau_d_saturated[i] = std::max(std::min(tau_d_saturated[i], tau_limit_), -tau_limit_);
+  }
+  
   return tau_d_saturated;
 }
 
@@ -511,32 +638,66 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   
   const TrajectoryPoint& target_point = trajectory_buffer_[current_trajectory_index_];
   
-  // LINEAR_JOINT_POSITION interpolation implementation
+  // LINEAR_JOINT_POSITION interpolation implementation with improved velocity profile
   for (size_t i = 0; i < 7; ++i) {
     double position_error = target_point.position[i] - last_interpolated_position_[i];
+    double error_abs = std::abs(position_error);
     
     // Apply max_delta_q constraint (from deoxys config)
     double max_delta = max_delta_position_per_cycle_[i];
-    double delta_position = std::max(std::min(position_error, max_delta), -max_delta);
+    
+    // Apply a velocity damping factor as we approach the target
+    // This creates a smoother deceleration profile
+    const double approach_threshold = 0.1; // radians
+    double damping_factor = 1.0;
+    
+    if (error_abs < approach_threshold) {
+      // Gradually reduce velocity as we get closer to the target
+      // This prevents overshoot and oscillation
+      damping_factor = error_abs / approach_threshold;
+      damping_factor = std::max(0.2, damping_factor); // Don't slow down too much
+    }
+    
+    double delta_position = std::max(std::min(position_error, max_delta * damping_factor), 
+                                    -max_delta * damping_factor);
     
     // Linear interpolation with velocity constraint
     interpolated_position[i] = last_interpolated_position_[i] + delta_position;
     target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
     
-    // Apply velocity smoothing
-    target_velocity[i] = std::max(std::min(target_velocity[i], 0.5), -0.5); // rad/s limit
+    // Apply velocity smoothing with lower limit near target
+    double vel_limit = 0.5;
+    if (error_abs < approach_threshold) {
+      vel_limit = 0.5 * damping_factor;
+    }
+    
+    target_velocity[i] = std::max(std::min(target_velocity[i], vel_limit), -vel_limit);
   }
   
   // Check if we've reached the target point (within tolerance)
   bool reached_target = true;
   const double position_tolerance = 0.01; // 0.01 radians (about 0.57 degrees)
+  const double velocity_tolerance = 0.05; // 0.05 rad/s - ensure we're also slowing down
+  
+  double max_pos_error = 0.0;
+  double max_vel = 0.0;
   
   for (size_t i = 0; i < 7; ++i) {
     double error = std::abs(interpolated_position[i] - target_point.position[i]);
+    double vel = std::abs(target_velocity[i]);
+    max_pos_error = std::max(max_pos_error, error);
+    max_vel = std::max(max_vel, vel);
+    
     if (error > position_tolerance) {
       reached_target = false;
       break;
     }
+  }
+  
+  // Only consider target reached if velocity is also low enough
+  // This prevents oscillation around the target
+  if (reached_target && max_vel > velocity_tolerance) {
+    reached_target = false;
   }
   
   // Only advance if we've reached the target
@@ -547,14 +708,31 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
     if (current_trajectory_index_ >= trajectory_buffer_.size()) {
       // We've reached the last point, but don't deactivate trajectory yet
       // This ensures the final position is properly held for one more cycle
+      
+      // If this is the final point, let's hold it stable for a bit longer
+      // to ensure the robot settles completely
+      trajectory_completion_countdown_ = 0; // Reset countdown to start hold period
+    } else {
+      // When moving to a new target, gradually ramp up velocity again
+      // Reset damping for the next target
+      trajectory_completion_countdown_ = 0;
     }
   } else {
     // If we're on the last point and been trying for a while, consider forcing completion
     if (current_trajectory_index_ == (trajectory_buffer_.size() - 1)) {
-      const int max_attempts = 500; // Allow 500ms of attempts (500 control cycles)
-      if (trajectory_completion_countdown_ > max_attempts) {
+      const int max_attempts = 300; // Reduced from 500ms to 300ms of attempts
+      const int hold_period = 100;  // Hold completed position for 100ms
+      
+      if (trajectory_completion_countdown_ > max_attempts + hold_period) {
         current_trajectory_index_++;
         trajectory_completion_countdown_ = 0;
+      } else if (trajectory_completion_countdown_ > max_attempts) {
+        // We're in the hold period, ensure we maintain position
+        // without making further adjustments
+        for (size_t i = 0; i < 7; ++i) {
+          target_velocity[i] = 0.0; // Zero velocity during hold period
+        }
+        trajectory_completion_countdown_++;
       } else {
         trajectory_completion_countdown_++;
       }
@@ -567,11 +745,23 @@ std::array<double, 7> JointImpedanceExampleController::interpolateTrajectory(
   
   // If trajectory is at end but still active, deactivate it now
   if (current_trajectory_index_ >= trajectory_buffer_.size() && trajectory_active_) {
-    trajectory_active_ = false;
+    // Instead of an abrupt deactivation, gradually transition
+    // by continuing to use the last interpolated position
     
-    // Update target positions to match final position from trajectory
-    if (!trajectory_buffer_.empty()) {
-      q_desired_target_ = trajectory_buffer_.back().position;
+    // Only deactivate after a short "settling period"
+    static int deactivation_count = 0;
+    const int settle_cycles = 50; // 50ms settling time
+    
+    if (deactivation_count > settle_cycles) {
+      trajectory_active_ = false;
+      deactivation_count = 0;
+      
+      // Update target positions to match final position from trajectory
+      if (!trajectory_buffer_.empty()) {
+        q_desired_target_ = trajectory_buffer_.back().position;
+      }
+    } else {
+      deactivation_count++;
     }
   }
   

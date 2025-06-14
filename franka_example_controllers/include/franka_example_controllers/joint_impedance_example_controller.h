@@ -115,6 +115,18 @@ class JointImpedanceExampleController : public controller_interface::MultiInterf
   // Trajectory interpolation parameter
   double time_fraction_{1.0};
 
+  // Controller startup smoothing
+  bool startup_phase_{true};
+  ros::Time startup_time_;
+  std::array<double, 7> initial_position_;
+  double startup_duration_{1.0}; // Increased time for smoother startup
+  
+  // Power limit protection parameters
+  double power_limit_{50.0}; // Maximum mechanical power allowed (W)
+  double power_limit_startup_{35.0}; // Reduced power limit during startup (W)
+  double tau_limit_{87.0}; // Maximum joint torque (Nm)
+  bool first_command_{true}; // Track first command for ramp-up
+  
   franka_hw::TriggerRate rate_trigger_{1.0};
   std::array<double, 7> last_tau_d_{};
   realtime_tools::RealtimePublisher<JointTorqueComparison> torques_publisher_;
