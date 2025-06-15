@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Robot arm ID -->
+  <arg name="robot_ip" default="172.16.0.2" />
+  <arg name="arm_id" default="panda" />
+  <arg name="load_gripper" default="true" />
+  
+  <!-- Controller selection arguments -->
+  <arg name="controller" default="dual_impedance_controller" />
+  <arg name="start_mode" default="cartesian" doc="Initial mode: 'cartesian' or 'joint'" />
+  
+  <!-- Start dual impedance controller -->
+  <group>
+    <!-- Load controller configuration -->
+    <rosparam file="$(find franka_example_controllers)/config/dual_impedance_controller.yaml" command="load" />
+    
+    <!-- Set initial mode -->
+    <param name="default_mode" value="true" if="$(eval arg('start_mode') == 'cartesian')" />
+    <param name="default_mode" value="false" if="$(eval arg('start_mode') == 'joint')" />
+    
+    <!-- Start the franka control node -->
+    <include file="$(find franka_control)/launch/franka_control.launch">
+      <arg name="robot_ip" value="$(arg robot_ip)" />
+      <arg name="load_gripper" value="$(arg load_gripper)" />
+    </include>
+
+    <!-- Spawn the dual impedance controller -->
+    <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" 
+          args="$(arg controller)" />
+
+    <!-- Load dynamic reconfigure compliance parameters for cartesian mode -->
+    <node name="dynamic_reconfigure_compliance_param_node" pkg="dynamic_reconfigure" type="dynparam" 
+          args="set_from_file dynamic_reconfigure_compliance_param_node $(find franka_example_controllers)/config/franka_example_controller.yaml" />
+
+    <!-- Mode switcher service -->
+    <node name="dual_mode_switcher" pkg="franka_example_controllers" type="dual_mode_switcher.py" output="screen">
+      <param name="default_mode" value="$(arg start_mode)" />
+    </node>
+
+    <!-- Start rviz with appropriate config -->
+    <node name="rviz" pkg="rviz" type="rviz" output="screen" 
+          args="-d $(find franka_example_controllers)/config/dual_impedance.rviz" if="$(arg load_gripper)" />
+  </group>
+
+  <!-- Optional: Robot state publisher for visualization -->
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+  
+  <!-- Joint state publisher for visualization -->
+  <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher">
+    <param name="use_gui" value="false" />
+  </node>
+
+</launch>

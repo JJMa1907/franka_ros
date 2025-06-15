@@ -1,0 +1,71 @@
+# Dual Impedance Controller Configuration
+
+# Control mode (true = cartesian, false = joint)
+default_mode: true  # Start in cartesian mode
+
+# Robot parameters
+arm_id: "panda"
+joint_names:
+  - panda_joint1
+  - panda_joint2
+  - panda_joint3
+  - panda_joint4
+  - panda_joint5
+  - panda_joint6
+  - panda_joint7
+
+# ========== Cartesian Impedance Parameters ==========
+# Stiffness parameters (N/m for translation, Nm/rad for rotation)
+cartesian_stiffness:
+  translational_stiffness_X: 1000.0
+  translational_stiffness_Y: 1000.0
+  translational_stiffness_Z: 1000.0
+  rotational_stiffness_X: 30.0
+  rotational_stiffness_Y: 30.0
+  rotational_stiffness_Z: 30.0
+
+# Nullspace stiffness
+nullspace_stiffness: 10.0
+
+# ========== Joint Impedance Parameters ==========
+# Joint impedance gains
+joint_kp: [300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0]
+joint_kd: [20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0]
+
+# Maximum delta position per control cycle (rad)
+max_delta_q: [0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
+
+# Joint limits
+joint_limits_upper: [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973]
+joint_limits_lower: [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973]
+joint_limit_margin: 0.1
+
+# ========== Common Parameters ==========
+# Publishing rate for diagnostics
+publish_rate: 30.0
+
+# Coriolis compensation factor
+coriolis_factor: 1.0
+
+# State estimation smoothing factors
+alpha_q: 0.9      # Position smoothing (0-1, higher = more smoothing)
+alpha_dq: 0.9     # Velocity smoothing (0-1, higher = more smoothing)
+
+# Trajectory interpolation
+time_fraction: 1.0
+startup_duration: 4.0
+
+# Power and torque limits
+power_limit: 80.0
+power_limit_startup: 56.0
+tau_limit: 87.0
+
+# ========== Joint Mode Specific ==========
+# External command mode settings
+use_external_command: true
+is_delta: false  # false = absolute positions, true = relative positions
+
+# Trajectory motion parameters
+radius: 0.1
+vel_max: 0.25
+acceleration_time: 2.0
