@@ -1,17 +1,22 @@
-// Copyright (c) 2023 Franka Robotics GmbH
+// Copyright (c) 2017 Franka Emika GmbH
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 #pragma once
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
 #include <controller_interface/multi_interface_controller.h>
 #include <dynamic_reconfigure/server.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/WrenchStamped.h>
+#include "std_msgs/MultiArrayLayout.h"
+#include "std_msgs/MultiArrayDimension.h"
+#include "std_msgs/Float32MultiArray.h"
 #include <hardware_interface/joint_command_interface.h>
 #include <hardware_interface/robot_hw.h>
+#include <dynamic_reconfigure/Config.h>
+#include <dynamic_reconfigure/DoubleParameter.h>
 #include <ros/node_handle.h>
 #include <ros/time.h>
 #include <Eigen/Dense>
@@ -41,20 +46,24 @@ class CartesianImpedanceExampleController : public controller_interface::MultiIn
   std::unique_ptr<franka_hw::FrankaModelHandle> model_handle_;
   std::vector<hardware_interface::JointHandle> joint_handles_;
 
-  double filter_params_{0.005};
-  double nullspace_stiffness_{20.0};
-  double nullspace_stiffness_target_{20.0};
+  double nullspace_stiffness_{0.0};
+  double nullspace_stiffness_target_{0.0};
+  double dt{0.001};
+  double time_start;
+  int alpha;
+  int filter_step{0};
+  int filter_step_;
   const double delta_tau_max_{1.0};
   Eigen::Matrix<double, 6, 6> cartesian_stiffness_;
-  Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;
   Eigen::Matrix<double, 6, 6> cartesian_damping_;
-  Eigen::Matrix<double, 6, 6> cartesian_damping_target_;
   Eigen::Matrix<double, 7, 1> q_d_nullspace_;
+  Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;
+  Eigen::Matrix<double, 6, 6> cartesian_damping_target_;
+  Eigen::Matrix<double, 6, 1> force_torque;
+  Eigen::Matrix<double, 6, 1> force_torque_old;
+  Eigen::Matrix<float, 7, 1> stiff_;
   Eigen::Vector3d position_d_;
   Eigen::Quaterniond orientation_d_;
-  std::mutex position_and_orientation_d_target_mutex_;
-  Eigen::Vector3d position_d_target_;
-  Eigen::Quaterniond orientation_d_target_;
 
   // Dynamic reconfigure
   std::unique_ptr<dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>>
@@ -66,6 +75,25 @@ class CartesianImpedanceExampleController : public controller_interface::MultiIn
   // Equilibrium pose subscriber
   ros::Subscriber sub_equilibrium_pose_;
   void equilibriumPoseCallback(const geometry_msgs::PoseStampedConstPtr& msg);
+
+  // Configuration pose subscriber
+  ros::Subscriber sub_equilibrium_config_;
+  void equilibriumConfigurationCallback( const std_msgs::Float32MultiArray::ConstPtr& joint);
+
+
+  // Multi directional stiffness stiffnes 
+  ros::Subscriber sub_stiffness_;
+  void equilibriumStiffnessCallback(const std_msgs::Float32MultiArray::ConstPtr& stiffness_);
+
+  ros::Publisher pub_stiff_update_;
+                                                  
+  ros::Publisher pub_cartesian_pose_;
+  ros::Publisher pub_force_torque_;
+  
+                                                
+                                                  
+
 };
+
 
 }  // namespace franka_example_controllers
