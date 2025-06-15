@@ -109,8 +109,8 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   time_fraction_ = 1.0;
   node_handle.getParam("time_fraction", time_fraction_);
   
-  // Set a more conservative default startup duration
-  startup_duration_ = 5.0;  // Increased to 5.0 seconds for more gradual startup
+  // Set a reasonable default startup duration (not too long)
+  startup_duration_ = 2.0;  // 2 seconds is sufficient for smooth startup
   node_handle.getParam("startup_duration", startup_duration_);
 
   position_smoothed_.fill(0.0);
@@ -291,14 +291,6 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
 }
 
 void DualImpedanceController::starting(const ros::Time& time) {
-  // Prevent double initialization
-  static bool already_started = false;
-  if (already_started) {
-    ROS_WARN("DualImpedanceController::starting() called multiple times - ignoring subsequent calls");
-    return;
-  }
-  already_started = true;
-  
   // Get initial robot state
   franka::RobotState initial_state = state_handle_->getRobotState();
   Eigen::Map<Eigen::Matrix<double, 7, 1> > q_initial(initial_state.q.data());
@@ -350,9 +342,9 @@ void DualImpedanceController::starting(const ros::Time& time) {
     last_tau_d_[i] = 0.0;
   }
   
-  // Initialize startup and transition variables
+  // Initialize startup and transition variables - much simpler startup
   startup_phase_ = true;
-  startup_time_ = ros::Time(0);
+  startup_time_ = time;  // Set startup time immediately
   first_command_ = true;
   mode_transition_active_ = false;
   transition_time_ = 0.0;
@@ -360,6 +352,8 @@ void DualImpedanceController::starting(const ros::Time& time) {
   
   // Clear trajectory (for joint mode)
   clearTrajectory();
+  
+  ROS_INFO("Dual impedance controller starting with smooth ramp-up over %.1f seconds", startup_duration_);
 }
 
 void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
@@ -378,36 +372,21 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
   Eigen::Map<Eigen::Matrix<double, 7, 1> > dq(robot_state.dq.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > tau_J_d(robot_state.tau_J_d.data());
 
-  // Handle startup smoothing (following original joint impedance controller pattern)
+  // Handle startup smoothing (much simpler approach)
   double startup_factor = 1.0;
   
   if (startup_phase_) {
-    // Initialize on first update cycle (matches original pattern)
-    if (startup_time_.isZero()) {
-      startup_time_ = time;
-      for (size_t i = 0; i < 7; ++i) {
-        initial_position_[i] = robot_state.q[i];
-      }
-      ROS_INFO("Dual impedance controller starting with smooth ramp-up over %.1f seconds", startup_duration_);
-    }
-    
     // Calculate time elapsed since controller start
     double time_elapsed = (time - startup_time_).toSec();
     if (time_elapsed < 0) {
       time_elapsed = 0;
     }
     
-    // CRITICAL: For the first 100ms, apply essentially no control (only gravity compensation)
-    if (time_elapsed < 0.1) {
-      startup_factor = 0.0;  // Pure gravity compensation for first 100ms
-    } else {
-      // Use quadratic ramp-up like original joint controller (not cubic)
-      double normalized_time = std::max(0.0, (time_elapsed - 0.1) / (startup_duration_ - 0.1));
-      startup_factor = std::min(normalized_time * normalized_time, 1.0);
-    }
+    // Simple linear ramp-up over startup_duration_ seconds
+    startup_factor = std::min(time_elapsed / startup_duration_, 1.0);
     
     // Exit startup phase after startup_duration_ seconds
-    if (time_elapsed > startup_duration_) {
+    if (time_elapsed >= startup_duration_) {
       startup_phase_ = false;
       startup_factor = 1.0;
       ROS_INFO("Dual impedance controller startup complete");
@@ -515,8 +494,8 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 
     // Cartesian PD control with startup smoothing
     if (startup_phase_) {
-      // During startup, use very conservative cartesian control
-      double conservative_factor = startup_factor * 0.01;  // Only 1% of normal gains for cartesian (was 5%)
+      // During startup, use conservative cartesian control - scale down the gains
+      double conservative_factor = startup_factor * 0.1;  // Only 10% of normal gains during startup
       Eigen::Matrix<double, 6, 6> effective_cartesian_stiffness = cartesian_stiffness_ * conservative_factor;
       Eigen::Matrix<double, 6, 6> effective_cartesian_damping = cartesian_damping_ * conservative_factor;
       double effective_nullspace_stiffness = nullspace_stiffness_ * conservative_factor;
@@ -598,16 +577,15 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       double velocity_error = target_velocity[i] - velocity_smoothed_[i];
       
       if (startup_phase_) {
-        // During startup, use very conservative approach - start with gravity only
-        // Gradually ramp up control gains using startup_factor
-        double conservative_factor = startup_factor * 0.1;  // Very conservative - only 10% of normal gains
+        // During startup, use conservative approach
+        double conservative_factor = startup_factor * 0.2;  // 20% of normal gains during startup
         double effective_k = k_gains_[i] * conservative_factor;
         double effective_d = d_gains_[i] * conservative_factor;
         
         tau_joint[i] = effective_k * position_error + effective_d * velocity_error;
         
-        // Very conservative torque limits during startup
-        double effective_tau_limit = tau_limit_ * 0.1;  // Only 10% of normal torque limit
+        // Conservative torque limits during startup
+        double effective_tau_limit = tau_limit_ * 0.5;  // 50% of normal torque limit
         tau_joint[i] = std::max(std::min(tau_joint[i], effective_tau_limit), -effective_tau_limit);
       } else {
         // Normal operation - full gains and limits
@@ -670,10 +648,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     }
   }
 
-  // During startup phase, prioritize gravity compensation over control torques
+  // During startup phase, apply conservative torque blending
   if (startup_phase_) {
     // Blend control torques with gravity compensation during startup
-    // Start with pure gravity compensation, gradually add control
     Eigen::Map<Eigen::Matrix<double, 7, 1> > gravity_eigen(gravity.data());
     tau_d = startup_factor * tau_d + (1.0 - startup_factor) * gravity_eigen;
   }
