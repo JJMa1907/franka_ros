@@ -18,6 +18,15 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
                                   ros::NodeHandle& node_handle) {
   // Initialize mode (default to cartesian)
   current_mode_ = CARTESIAN_IMPEDANCE;
+  prev_mode_ = CARTESIAN_IMPEDANCE;
+  mode_transition_active_ = false;
+  transition_time_ = 0.0;
+  
+  // Get transition duration parameter
+  if (!node_handle.getParam("transition_duration", transition_duration_)) {
+    ROS_INFO_STREAM("DualImpedanceController: transition_duration not found. Defaulting to " << transition_duration_);
+  }
+  
   mode_sub_ = node_handle.subscribe("/impedance_mode", 1, &DualImpedanceController::modeCallback, this);
   
   // Get arm_id parameter
@@ -99,6 +108,9 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
 
   time_fraction_ = 1.0;
   node_handle.getParam("time_fraction", time_fraction_);
+  
+  // Set a more conservative default startup duration
+  startup_duration_ = 5.0;  // Increased to 5.0 seconds for more gradual startup
   node_handle.getParam("startup_duration", startup_duration_);
 
   position_smoothed_.fill(0.0);
@@ -225,14 +237,31 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   dynamic_server_compliance_param_->setCallback(
       boost::bind(&DualImpedanceController::complianceParamCallback, this, _1, _2));
 
-  // Initialize variables
+  // Initialize variables - CRITICAL: Follow exact pattern from original cartesian controller
   position_d_.setZero();
   orientation_d_.coeffs() << 0.0, 0.0, 0.0, 1.0;
+  
+  // CRITICAL: Initialize all stiffness/damping matrices to ZERO like original cartesian controller
+  // This prevents huge torques on first control cycles - controller starts with NO impedance
   cartesian_stiffness_.setZero();
   cartesian_damping_.setZero();
+  cartesian_stiffness_target_.setZero();
+  cartesian_damping_target_.setZero();
+  nullspace_stiffness_ = 0.0;
+  nullspace_stiffness_target_ = 0.0;
+  
+  // CRITICAL: Flag to track if stiffness has been initialized by dynamic reconfigure
+  cartesian_stiffness_initialized_ = false;
+  
+  // Initialize other cartesian variables exactly like original
   stiff_.setZero();
   force_torque.setZero();
   force_torque_old.setZero();
+  
+  // Initialize cartesian filter variables exactly like original
+  filter_step = 0;
+  filter_step_ = 5;  // Default filter steps like original
+  alpha = 0.2;       // Default alpha like original
 
   // Initialize joint variables
   for (size_t i = 0; i < 7; ++i) {
@@ -250,42 +279,90 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   trajectory_completion_countdown_ = 0;
 
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
+  
+  // Initialize startup variables for smooth controller start
+  startup_phase_ = true;
+  startup_time_ = ros::Time(0);
+  first_command_ = true;
+  std::fill(initial_position_.begin(), initial_position_.end(), 0.0);
+  std::fill(last_tau_d_.begin(), last_tau_d_.end(), 0.0);
 
   return true;
 }
 
-void DualImpedanceController::starting(const ros::Time& /*time*/) {
-  // Get initial state
+void DualImpedanceController::starting(const ros::Time& time) {
+  // Prevent double initialization
+  static bool already_started = false;
+  if (already_started) {
+    ROS_WARN("DualImpedanceController::starting() called multiple times - ignoring subsequent calls");
+    return;
+  }
+  already_started = true;
+  
+  // Get initial robot state
   franka::RobotState initial_state = state_handle_->getRobotState();
-  
-  // Initialize cartesian mode variables
-  std::array<double, 42> jacobian_array = model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
-  Eigen::Map<Eigen::Matrix<double, 6, 7> > jacobian(jacobian_array.data());
-  Eigen::Map<Eigen::Matrix<double, 7, 1> > dq_initial(initial_state.dq.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > q_initial(initial_state.q.data());
-  Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
   
-  position_d_ = initial_transform.translation();
-  orientation_d_ = Eigen::Quaterniond(initial_transform.linear());
-  q_d_nullspace_ = q_initial;
-  
-  // Initialize joint mode variables
-  if (cartesian_pose_handle_) {
-    initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+  // Initialize ONLY the default mode (Cartesian) - much simpler like original controllers
+  if (current_mode_ == CARTESIAN_IMPEDANCE) {
+    // Follow cartesian_impedance_example_controller pattern exactly
+    Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
+    
+    position_d_ = initial_transform.translation();
+    orientation_d_ = Eigen::Quaterniond(initial_transform.linear());
+    q_d_nullspace_ = q_initial;
+    force_torque_old.setZero();
+    cartesian_stiffness_initialized_ = false; // Ensure stiffness is not yet initialized
+    
+    // CRITICAL: Keep stiffness matrices at ZERO - they will be set by dynamic reconfigure
+    // Do NOT set any non-zero stiffness values here!
+    
+    ROS_INFO("DualImpedanceController: Starting in Cartesian Impedance Mode");
   } else {
-    initial_pose_ = initial_state.O_T_EE_d;
+    // Follow joint_impedance_example_controller pattern exactly
+    if (cartesian_pose_handle_) {
+      initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+      franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();
+      for (size_t i = 0; i < 7; ++i) {
+        q_desired_target_[i] = robot_state.q[i];
+        position_smoothed_[i] = robot_state.q[i];
+        velocity_smoothed_[i] = robot_state.dq[i];
+        last_interpolated_position_[i] = robot_state.q[i];
+        last_interpolated_velocity_[i] = robot_state.dq[i];
+      }
+    } else {
+      for (size_t i = 0; i < 7; ++i) {
+        q_desired_target_[i] = initial_state.q[i];
+        position_smoothed_[i] = initial_state.q[i];
+        velocity_smoothed_[i] = initial_state.dq[i];
+        last_interpolated_position_[i] = initial_state.q[i];
+        last_interpolated_velocity_[i] = initial_state.dq[i];
+      }
+    }
+    
+    ROS_INFO("DualImpedanceController: Starting in Joint Impedance Mode");
   }
   
-  Eigen::Map<Eigen::Matrix<double, 7, 1> > q_initial_joint(initial_state.q.data());
+  // Common initialization
   for (size_t i = 0; i < 7; ++i) {
-    q_d_array_[i] = q_initial_joint[i];
-    q_desired_target_[i] = q_initial_joint[i];
-    last_interpolated_position_[i] = q_initial_joint[i];
-    position_smoothed_[i] = q_initial_joint[i];
+    dq_filtered_[i] = initial_state.dq[i];
+    initial_position_[i] = initial_state.q[i];
+    last_tau_d_[i] = 0.0;
   }
+  
+  // Initialize startup and transition variables
+  startup_phase_ = true;
+  startup_time_ = ros::Time(0);
+  first_command_ = true;
+  mode_transition_active_ = false;
+  transition_time_ = 0.0;
+  last_mode_tau_d_.setZero();
+  
+  // Clear trajectory (for joint mode)
+  clearTrajectory();
 }
 
-void DualImpedanceController::update(const ros::Time& time, const ros::Duration& /*period*/) {
+void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
   // Get current robot state
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
@@ -301,10 +378,66 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
   Eigen::Map<Eigen::Matrix<double, 7, 1> > dq(robot_state.dq.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > tau_J_d(robot_state.tau_J_d.data());
 
-  Eigen::VectorXd tau_d(7);
+  // Handle startup smoothing (following original joint impedance controller pattern)
+  double startup_factor = 1.0;
+  
+  if (startup_phase_) {
+    // Initialize on first update cycle (matches original pattern)
+    if (startup_time_.isZero()) {
+      startup_time_ = time;
+      for (size_t i = 0; i < 7; ++i) {
+        initial_position_[i] = robot_state.q[i];
+      }
+      ROS_INFO("Dual impedance controller starting with smooth ramp-up over %.1f seconds", startup_duration_);
+    }
+    
+    // Calculate time elapsed since controller start
+    double time_elapsed = (time - startup_time_).toSec();
+    if (time_elapsed < 0) {
+      time_elapsed = 0;
+    }
+    
+    // CRITICAL: For the first 100ms, apply essentially no control (only gravity compensation)
+    if (time_elapsed < 0.1) {
+      startup_factor = 0.0;  // Pure gravity compensation for first 100ms
+    } else {
+      // Use quadratic ramp-up like original joint controller (not cubic)
+      double normalized_time = std::max(0.0, (time_elapsed - 0.1) / (startup_duration_ - 0.1));
+      startup_factor = std::min(normalized_time * normalized_time, 1.0);
+    }
+    
+    // Exit startup phase after startup_duration_ seconds
+    if (time_elapsed > startup_duration_) {
+      startup_phase_ = false;
+      startup_factor = 1.0;
+      ROS_INFO("Dual impedance controller startup complete");
+    }
+  }
 
+  // Update mode transition if active
+  if (mode_transition_active_) {
+    transition_time_ += period.toSec();
+    if (transition_time_ >= transition_duration_) {
+      mode_transition_active_ = false;
+      transition_time_ = 0.0;
+      ROS_INFO("Mode transition completed");
+    }
+  }
+
+  Eigen::VectorXd tau_cartesian(7), tau_joint(7), tau_d(7);
+  tau_cartesian.setZero();
+  tau_joint.setZero();
+
+  // Compute control ONLY for the active mode to avoid conflicts
   if (current_mode_ == CARTESIAN_IMPEDANCE) {
     // ============ CARTESIAN IMPEDANCE MODE ============
+    
+    // CRITICAL SAFETY CHECK: Do not apply any cartesian control until stiffness is initialized
+    if (!cartesian_stiffness_initialized_) {
+      // Apply only gravity compensation until dynamic reconfigure sets proper stiffness values
+      Eigen::Map<Eigen::Matrix<double, 7, 1> > gravity_eigen(gravity.data());
+      tau_cartesian = gravity_eigen;
+    } else {
     
     // Get current pose
     Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
@@ -380,11 +513,21 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       null_vect(i) = q_d_nullspace_(i) - q(i);
     }
 
-    // Cartesian PD control
-    tau_task << jacobian.transpose() * (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
-    
-    // Nullspace PD control
-    tau_nullspace << Null_mat * (nullspace_stiffness_ * null_vect - 2.0 * sqrt(nullspace_stiffness_) * dq);
+    // Cartesian PD control with startup smoothing
+    if (startup_phase_) {
+      // During startup, use very conservative cartesian control
+      double conservative_factor = startup_factor * 0.01;  // Only 1% of normal gains for cartesian (was 5%)
+      Eigen::Matrix<double, 6, 6> effective_cartesian_stiffness = cartesian_stiffness_ * conservative_factor;
+      Eigen::Matrix<double, 6, 6> effective_cartesian_damping = cartesian_damping_ * conservative_factor;
+      double effective_nullspace_stiffness = nullspace_stiffness_ * conservative_factor;
+      
+      tau_task << jacobian.transpose() * (-effective_cartesian_stiffness * error - effective_cartesian_damping * (jacobian * dq));
+      tau_nullspace << Null_mat * (effective_nullspace_stiffness * null_vect - 2.0 * sqrt(std::max(effective_nullspace_stiffness, 1e-6)) * dq);
+    } else {
+      // Normal operation - full gains
+      tau_task << jacobian.transpose() * (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
+      tau_nullspace << Null_mat * (nullspace_stiffness_ * null_vect - 2.0 * sqrt(std::max(nullspace_stiffness_, 1e-6)) * dq);
+    }
     
     // Joint limits
     tau_joint_limit.setZero();
@@ -403,7 +546,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     if (q(6) > 2.8)   { tau_joint_limit(6) = -10; }
     if (q(6) < -2.8)  { tau_joint_limit(6) = +10; }
 
-    tau_d << tau_task + tau_nullspace + coriolis + tau_joint_limit;
+    tau_cartesian << tau_task + tau_nullspace + coriolis + tau_joint_limit;
 
     // Update stiffness and damping
     cartesian_stiffness_ = cartesian_stiffness_target_;
@@ -411,14 +554,23 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     nullspace_stiffness_ = nullspace_stiffness_target_;
     Eigen::AngleAxisd aa_orientation_d(orientation_d_);
     orientation_d_ = Eigen::Quaterniond(aa_orientation_d);
-
-  } else {
+    
+    } // End of cartesian_stiffness_initialized_ check
+  }
+  
+  if (current_mode_ == JOINT_IMPEDANCE) {
     // ============ JOINT IMPEDANCE MODE ============
     
-    // Smooth state estimation
+    // Smooth state estimation with exponential filtering
     for (size_t i = 0; i < 7; ++i) {
-      position_smoothed_[i] = alpha_q_ * position_smoothed_[i] + (1.0 - alpha_q_) * q[i];
-      velocity_smoothed_[i] = alpha_dq_ * velocity_smoothed_[i] + (1.0 - alpha_dq_) * dq[i];
+      position_smoothed_[i] = alpha_q_ * q[i] + (1.0 - alpha_q_) * position_smoothed_[i];
+      velocity_smoothed_[i] = alpha_dq_ * dq[i] + (1.0 - alpha_dq_) * velocity_smoothed_[i];
+    }
+    
+    // Apply additional velocity filtering for stability
+    double alpha_filter = 0.99;
+    for (size_t i = 0; i < 7; i++) {
+      dq_filtered_[i] = (1 - alpha_filter) * dq_filtered_[i] + alpha_filter * robot_state.dq[i];
     }
 
     // Trajectory interpolation
@@ -428,7 +580,8 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     } else {
       // Use current position if no trajectory
       for (size_t i = 0; i < 7; ++i) {
-        target_position[i] = position_smoothed_[i];
+        target_position[i] = use_external_command_ && external_command_received_ ? 
+                            q_desired_target_[i] : position_smoothed_[i];
         target_velocity[i] = 0.0;
       }
     }
@@ -439,25 +592,97 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       last_interpolated_velocity_[i] = target_velocity[i];
     }
 
-    // Compute joint impedance control
+    // Compute joint impedance control with startup smoothing
     for (size_t i = 0; i < 7; ++i) {
-      tau_d[i] = k_gains_[i] * (target_position[i] - position_smoothed_[i]) + 
-                 d_gains_[i] * (target_velocity[i] - velocity_smoothed_[i]);
+      double position_error = target_position[i] - position_smoothed_[i];
+      double velocity_error = target_velocity[i] - velocity_smoothed_[i];
+      
+      if (startup_phase_) {
+        // During startup, use very conservative approach - start with gravity only
+        // Gradually ramp up control gains using startup_factor
+        double conservative_factor = startup_factor * 0.1;  // Very conservative - only 10% of normal gains
+        double effective_k = k_gains_[i] * conservative_factor;
+        double effective_d = d_gains_[i] * conservative_factor;
+        
+        tau_joint[i] = effective_k * position_error + effective_d * velocity_error;
+        
+        // Very conservative torque limits during startup
+        double effective_tau_limit = tau_limit_ * 0.1;  // Only 10% of normal torque limit
+        tau_joint[i] = std::max(std::min(tau_joint[i], effective_tau_limit), -effective_tau_limit);
+      } else {
+        // Normal operation - full gains and limits
+        tau_joint[i] = k_gains_[i] * position_error + d_gains_[i] * velocity_error;
+        tau_joint[i] = std::max(std::min(tau_joint[i], tau_limit_), -tau_limit_);
+      }
+      
+      // Joint limit protection
+      double dist_to_upper = joint_limits_upper_[i] - position_smoothed_[i];
+      double dist_to_lower = position_smoothed_[i] - joint_limits_lower_[i];
+      
+      if (dist_to_upper < joint_limit_margin_ && tau_joint[i] > 0.0) {
+        tau_joint[i] = 0.0;
+      }
+      if (dist_to_lower < joint_limit_margin_ && tau_joint[i] < 0.0) {
+        tau_joint[i] = 0.0;
+      }
     }
 
     // Add coriolis compensation
-    tau_d += coriolis_factor_ * coriolis;
+    tau_joint += coriolis_factor_ * coriolis;
 
     // Publish torque comparison
     if (rate_trigger_()) {
       if (torques_publisher_.trylock()) {
         for (size_t i = 0; i < 7; ++i) {
-          torques_publisher_.msg_.tau_d[i] = tau_d[i];
-          torques_publisher_.msg_.tau_J_d[i] = tau_J_d[i];
+          torques_publisher_.msg_.tau_commanded[i] = tau_joint[i];
+          torques_publisher_.msg_.tau_measured[i] = tau_J_d[i];
+          torques_publisher_.msg_.tau_error[i] = tau_joint[i] - tau_J_d[i];
         }
+        // Calculate root mean square error
+        double sum_squared_error = 0.0;
+        for (size_t i = 0; i < 7; ++i) {
+          sum_squared_error += std::pow(tau_joint[i] - tau_J_d[i], 2);
+        }
+        torques_publisher_.msg_.root_mean_square_error = std::sqrt(sum_squared_error / 7.0);
         torques_publisher_.unlockAndPublish();
       }
     }
+  }
+
+  // Mode blending for smooth transition
+  if (mode_transition_active_) {
+    // During transition, blend with previous mode's last torque
+    double alpha = std::min(transition_time_ / transition_duration_, 1.0);
+    
+    if (current_mode_ == CARTESIAN_IMPEDANCE) {
+      // Transitioning to Cartesian mode, blend from last Joint torques to current Cartesian
+      tau_d = (1.0 - alpha) * last_mode_tau_d_ + alpha * tau_cartesian;
+    } else {
+      // Transitioning to Joint mode, blend from last Cartesian torques to current Joint  
+      tau_d = (1.0 - alpha) * last_mode_tau_d_ + alpha * tau_joint;
+    }
+  } else {
+    // No transition, use current mode's torque
+    if (current_mode_ == CARTESIAN_IMPEDANCE) {
+      tau_d = tau_cartesian;
+    } else {
+      tau_d = tau_joint;
+    }
+  }
+
+  // During startup phase, prioritize gravity compensation over control torques
+  if (startup_phase_) {
+    // Blend control torques with gravity compensation during startup
+    // Start with pure gravity compensation, gradually add control
+    Eigen::Map<Eigen::Matrix<double, 7, 1> > gravity_eigen(gravity.data());
+    tau_d = startup_factor * tau_d + (1.0 - startup_factor) * gravity_eigen;
+  }
+
+  // Store current torque for next possible transition (before saturation)
+  if (current_mode_ == CARTESIAN_IMPEDANCE) {
+    last_mode_tau_d_ = tau_cartesian;
+  } else {
+    last_mode_tau_d_ = tau_joint;
   }
 
   // Saturate torque rate to avoid discontinuities
@@ -467,15 +692,67 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d(i));
   }
+  
+  // Store last commanded torque for next cycle
+  std::array<double, 7> gravity_compensation = model_handle_->getGravity();
+  for (size_t i = 0; i < 7; ++i) {
+    last_tau_d_[i] = tau_d(i) + gravity_compensation[i];
+  }
 }
 
 void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) {
-  if (msg->data) {
-    current_mode_ = CARTESIAN_IMPEDANCE;
-    ROS_INFO("Switched to Cartesian Impedance Mode");
-  } else {
-    current_mode_ = JOINT_IMPEDANCE;
-    ROS_INFO("Switched to Joint Impedance Mode");
+  ControlMode new_mode = msg->data ? CARTESIAN_IMPEDANCE : JOINT_IMPEDANCE;
+  
+  if (new_mode != current_mode_) {
+    // Store current torque before switching for smooth transition
+    franka::RobotState robot_state = state_handle_->getRobotState();
+    Eigen::Map<Eigen::Matrix<double, 7, 1> > tau_J_d(robot_state.tau_J_d.data());
+    last_mode_tau_d_ = tau_J_d;
+    
+    // Switch mode
+    prev_mode_ = current_mode_;
+    current_mode_ = new_mode;
+    mode_transition_active_ = true;
+    transition_time_ = 0.0;
+    
+    // Reinitialize ONLY the new mode (following original controller patterns)
+    if (new_mode == CARTESIAN_IMPEDANCE) {
+      // Reinitialize cartesian mode exactly like the original controller
+      Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+      position_d_ = current_transform.translation();
+      orientation_d_ = Eigen::Quaterniond(current_transform.linear());
+      
+      Eigen::Map<Eigen::Matrix<double, 7, 1> > q_current(robot_state.q.data());
+      q_d_nullspace_ = q_current;
+      
+      ROS_INFO("DualImpedanceController: Switched to Cartesian Impedance Mode");
+    } else {
+      // Reinitialize joint mode exactly like the original controller
+      if (cartesian_pose_handle_) {
+        initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+        franka::RobotState pose_state = cartesian_pose_handle_->getRobotState();
+        for (size_t i = 0; i < 7; ++i) {
+          q_desired_target_[i] = pose_state.q[i];
+          position_smoothed_[i] = pose_state.q[i];
+          velocity_smoothed_[i] = pose_state.dq[i];
+          last_interpolated_position_[i] = pose_state.q[i];
+          last_interpolated_velocity_[i] = pose_state.dq[i];
+        }
+      } else {
+        for (size_t i = 0; i < 7; ++i) {
+          q_desired_target_[i] = robot_state.q[i];
+          position_smoothed_[i] = robot_state.q[i];
+          velocity_smoothed_[i] = robot_state.dq[i];
+          last_interpolated_position_[i] = robot_state.q[i];
+          last_interpolated_velocity_[i] = robot_state.dq[i];
+        }
+      }
+      
+      // Clear trajectory to prevent jumps
+      clearTrajectory();
+      
+      ROS_INFO("DualImpedanceController: Switched to Joint Impedance Mode");
+    }
   }
 }
 
@@ -483,10 +760,49 @@ Eigen::Matrix<double, 7, 1> DualImpedanceController::saturateTorqueRate(
     const Eigen::Matrix<double, 7, 1>& tau_d_calculated,
     const Eigen::Matrix<double, 7, 1>& tau_J_d) {
   Eigen::Matrix<double, 7, 1> tau_d_saturated{};
+  
+  // Use variable torque rate limits based on controller state
+  double delta_tau_max = kDeltaTauMax;
+  
+  // For startup phase or first command, use much lower torque rate limit
+  if (startup_phase_ || first_command_) {
+    delta_tau_max = kDeltaTauMax * 0.05; // Only 5% of normal limit during startup (extremely conservative)
+    first_command_ = false; // Clear first command flag
+  }
+  
+  // Calculate estimated mechanical power after applying rate limiting
+  double total_power = 0.0;
+  Eigen::Matrix<double, 7, 1> rate_limited_tau;
+  
+  // First calculate rate-limited torques
   for (size_t i = 0; i < 7; i++) {
     double difference = tau_d_calculated[i] - tau_J_d[i];
-    tau_d_saturated[i] = tau_J_d[i] + std::max(std::min(difference, delta_tau_max_), -delta_tau_max_);
+    rate_limited_tau[i] = tau_J_d[i] + std::max(std::min(difference, delta_tau_max), -delta_tau_max);
+    
+    // P = τ * ω (torque * angular velocity)
+    total_power += std::abs(rate_limited_tau[i] * dq_filtered_[i]);
   }
+  
+  // Apply additional scaling if power limit would be exceeded
+  double power_scaling = 1.0;
+  
+  // Use more conservative power limit during startup phase
+  double effective_power_limit = startup_phase_ ? power_limit_startup_ : power_limit_;
+  
+  if (total_power > effective_power_limit && total_power > 0) {
+    power_scaling = effective_power_limit / total_power;
+    // Ensure we never scale up, only down
+    power_scaling = std::min(power_scaling, 1.0);
+  }
+  
+  // Apply power scaling to the rate-limited torques
+  for (size_t i = 0; i < 7; i++) {
+    // Apply power scaling to rate_limited torque
+    tau_d_saturated[i] = rate_limited_tau[i] * power_scaling;
+    // Finally apply absolute limit
+    tau_d_saturated[i] = std::max(std::min(tau_d_saturated[i], tau_limit_), -tau_limit_);
+  }
+  
   return tau_d_saturated;
 }
 
@@ -500,23 +816,23 @@ void DualImpedanceController::equilibriumStiffnessCallback(
     i++;
   }
 
-  cartesian_stiffness_target_(0,0) = std::max(std::min(stiff_[0], float(4000.0)), float(0.0));
-  cartesian_stiffness_target_(1,1) = std::max(std::min(stiff_[1], float(4000.0)), float(0.0));
-  cartesian_stiffness_target_(2,2) = std::max(std::min(stiff_[2], float(4000.0)), float(0.0));
+  cartesian_stiffness_target_(0,0) = std::max(std::min(static_cast<double>(stiff_[0]), 4000.0), 0.0);
+  cartesian_stiffness_target_(1,1) = std::max(std::min(static_cast<double>(stiff_[1]), 4000.0), 0.0);
+  cartesian_stiffness_target_(2,2) = std::max(std::min(static_cast<double>(stiff_[2]), 4000.0), 0.0);
 
   cartesian_damping_target_(0,0) = 2.0 * sqrt(cartesian_stiffness_target_(0,0));
   cartesian_damping_target_(1,1) = 2.0 * sqrt(cartesian_stiffness_target_(1,1));
   cartesian_damping_target_(2,2) = 2.0 * sqrt(cartesian_stiffness_target_(2,2));
 
-  cartesian_stiffness_target_(3,3) = std::max(std::min(stiff_[3], float(50.0)), float(0.0));
-  cartesian_stiffness_target_(4,4) = std::max(std::min(stiff_[4], float(50.0)), float(0.0));
-  cartesian_stiffness_target_(5,5) = std::max(std::min(stiff_[5], float(50.0)), float(0.0));
+  cartesian_stiffness_target_(3,3) = std::max(std::min(static_cast<double>(stiff_[3]), 50.0), 0.0);
+  cartesian_stiffness_target_(4,4) = std::max(std::min(static_cast<double>(stiff_[4]), 50.0), 0.0);
+  cartesian_stiffness_target_(5,5) = std::max(std::min(static_cast<double>(stiff_[5]), 50.0), 0.0);
 
   cartesian_damping_target_(3,3) = 2.0 * sqrt(cartesian_stiffness_target_(3,3));
   cartesian_damping_target_(4,4) = 2.0 * sqrt(cartesian_stiffness_target_(4,4));
   cartesian_damping_target_(5,5) = 2.0 * sqrt(cartesian_stiffness_target_(5,5));
 
-  nullspace_stiffness_target_ = std::max(std::min(stiff_[6], float(20.0)), float(0.0));
+  nullspace_stiffness_target_ = std::max(std::min(static_cast<double>(stiff_[6]), 20.0), 0.0);
 
   // Publish dynamic reconfigure updates
   dynamic_reconfigure::Config set_Kx;
@@ -587,6 +903,9 @@ void DualImpedanceController::complianceParamCallback(
   cartesian_damping_target_(4,4) = 2.0 * sqrt(config.rotational_stiffness_Y);
   cartesian_damping_target_(5,5) = 2.0 * sqrt(config.rotational_stiffness_Z);
   nullspace_stiffness_target_ = config.nullspace_stiffness;
+  
+  // CRITICAL: Mark stiffness as initialized
+  cartesian_stiffness_initialized_ = true;
 }
 
 void DualImpedanceController::equilibriumPoseCallback(

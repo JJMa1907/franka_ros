@@ -1,0 +1,18 @@
+# Dynamic reconfigure parameters for the Cartesian impedance controller
+# Used by the dual_impedance_controller in Cartesian mode
+
+# Single node configuration format for dynamic_reconfigure
+{
+  # Translational stiffness parameters (N/m) - further reduced for smoother motion
+  translational_stiffness_X: 400.0,
+  translational_stiffness_Y: 400.0,
+  translational_stiffness_Z: 400.0,
+
+  # Rotational stiffness parameters (Nm/rad) - further reduced for smoother motion
+  rotational_stiffness_X: 10.0,
+  rotational_stiffness_Y: 10.0,
+  rotational_stiffness_Z: 10.0,
+
+  # Nullspace stiffness - reduced for smoother motion
+  nullspace_stiffness: 5.0
+}

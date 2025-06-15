@@ -52,8 +52,15 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   // Mode control
   enum ControlMode { CARTESIAN_IMPEDANCE, JOINT_IMPEDANCE };
   ControlMode current_mode_;
+  ControlMode prev_mode_;
   void modeCallback(const std_msgs::Bool::ConstPtr& msg);
   ros::Subscriber mode_sub_;
+  
+  // Mode transition smoothing
+  bool mode_transition_active_{false};
+  double transition_duration_{1.0}; // seconds
+  double transition_time_{0.0}; // seconds
+  Eigen::Matrix<double, 7, 1> last_mode_tau_d_;
   
   // Saturation
   Eigen::Matrix<double, 7, 1> saturateTorqueRate(
@@ -70,6 +77,7 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   Eigen::Quaterniond orientation_d_;
   double nullspace_stiffness_{0.0};
   double nullspace_stiffness_target_{0.0};
+  bool cartesian_stiffness_initialized_{false};  // Flag to track stiffness initialization
   
   // Cartesian subscribers
   ros::Subscriber sub_equilibrium_pose_;
@@ -144,10 +152,17 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   bool is_delta_{false};
   bool external_command_received_{false};
   
+  // Startup smoothing variables
+  bool startup_phase_{true};
+  ros::Time startup_time_;
+  bool first_command_{true};
+  std::array<double, 7> initial_position_;
+  std::array<double, 7> last_tau_d_;
+  
   // Joint limits
   std::array<double, 7> joint_limits_upper_;
   std::array<double, 7> joint_limits_lower_;
-  std::array<double, 7> initial_pose_;
+  std::array<double, 16> initial_pose_;
   
   // Joint subscribers and publishers
   ros::Subscriber joint_command_sub_;
@@ -167,6 +182,7 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   
   // Common parameters
   const double delta_tau_max_{1.0};
+  const double kDeltaTauMax = 1.0;  // Max torque rate for startup smoothing
   
   // Dynamic reconfigure
   ros::NodeHandle dynamic_reconfigure_compliance_param_node_;

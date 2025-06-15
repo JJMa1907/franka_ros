@@ -150,3 +150,93 @@ grasp_pub.publish(grasp_goal)
 
 如果你还想通过 Python 设置成循环控制或动态控制闭合力度宽度，也可以更灵活扩展。需要我帮你做一个完整可运行的 ROS 节点示例吗？
 
+## 双阻抗控制器 (DualImpedanceController) 使用指南
+
+`DualImpedanceController` 是一个ROS控制器，为Franka Emika机器人提供双模式控制，可以在笛卡尔阻抗控制和关节阻抗控制之间切换。以下是使用方法：
+
+### 基本概述
+
+该控制器提供两种主要模式：
+1. **笛卡尔阻抗模式**：使用笛卡尔空间中的阻抗控制来控制末端执行器的位置和方向
+2. **关节阻抗模式**：在关节级别使用阻抗控制来控制机器人
+
+### 设置与启动
+
+YAML文件（例如 `dual_impedance_controller.yaml`）
+启动文件（例如 `dual_impedance_control.launch`）来加载和启动控制器：
+
+#### 3. 启动控制器
+
+```bash
+roslaunch franka_example_controllers dual_impedance_controller.launch load_gripper:=true robot_ip:=172.16.0.3 arm_id:="panda"
+```
+#### 切换控制模式
+
+控制器监听 `/impedance_mode` 话题以切换模式：
+- `true`：笛卡尔阻抗模式
+- `false`：关节阻抗模式
+
+切换模式的命令：
+
+```bash
+# 切换到笛卡尔阻抗模式
+rostopic pub /impedance_mode std_msgs/Bool "data: true" -1
+
+# 切换到关节阻抗模式
+rostopic pub /impedance_mode std_msgs/Bool "data: false" -1
+```
+
+#### 笛卡尔阻抗模式
+
+在笛卡尔模式下，您可以控制：
+
+1. **末端执行器姿态**：通过 `/equilibrium_pose` 话题发送目标位置
+   ```bash
+   rostopic pub /equilibrium_pose geometry_msgs/PoseStamped "{header: {frame_id: 'panda_link0'}, pose: {position: {x: 0.5, y: 0.0, z: 0.5}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}" -1
+   ```
+
+2. **刚度设置**：通过 `/stiffness` 话题修改刚度值
+   ```bash
+   # 格式：[x, y, z, rx, ry, rz, nullspace] 刚度值
+   rostopic pub /stiffness std_msgs/Float32MultiArray "data: [1000.0, 1000.0, 1000.0, 30.0, 30.0, 30.0, 10.0]" -1
+   ```
+
+3. **零空间配置**：通过 `/equilibrium_configuration` 控制零空间行为
+   ```bash
+   # 格式：[q1, q2, q3, q4, q5, q6, q7] - 用于零空间控制的关节位置
+   rostopic pub /equilibrium_configuration std_msgs/Float32MultiArray "data: [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]" -1
+   ```
+
+#### 关节阻抗模式
+
+在关节模式下，您可以通过 `joint_command` 话题发送关节位置命令：
+
+```bash
+# 格式：[q1, q2, q3, q4, q5, q6, q7] - 目标关节位置
+rostopic pub /dual_impedance_controller/joint_command std_msgs/Float64MultiArray "data: [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]" -1
+```
+
+#### 监控
+
+1. **当前姿态**：当前末端执行器姿态发布到 `/cartesian_pose`
+2. **外部力/力矩**：力和力矩估计发布到 `/force_torque_ext`
+3. **关节力矩**：命令和测量的关节力矩发布到 `/torque_comparison`
+
+### 高级功能
+
+- 控制器自动处理关节限制
+- 系统应用力矩速率限制以确保平稳过渡
+- 您可以调整参数如刚度、阻尼和零空间行为
+- 它支持关节模式下的轨迹执行
+
+### 调试和调优
+
+如果您遇到问题或需要调整控制器：
+
+1. 从较低的刚度值开始
+2. 检查您期望的姿态是否可达
+3. 监控 `/force_torque_ext` 话题以确保机器人不会施加过大的力
+4. 渐进式地调整刚度和阻尼参数，直到达到您期望的行为
+
+该控制器设计为在机器人的能力范围内安全运行，但在测试新参数或命令时，请始终监控机器人的行为。
+
