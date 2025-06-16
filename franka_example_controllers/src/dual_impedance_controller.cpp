@@ -73,7 +73,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   // Initialize smoothed state variables
   position_smoothed_.fill(0.0);
   velocity_smoothed_.fill(0.0);
-  max_delta_q_.resize(7);
+  // Copy values from max_delta_q vector to the fixed-size array max_delta_q_
   for (size_t i = 0; i < 7; ++i) {
     max_delta_q_[i] = max_delta_q[i];
   }

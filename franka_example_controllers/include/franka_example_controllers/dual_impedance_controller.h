@@ -96,9 +96,6 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
       dynamic_server_compliance_param_;
   ros::NodeHandle dynamic_reconfigure_compliance_param_node_;
   
-  // Cartesian publishers
-  ros::Publisher pub_cartesian_pose_;
-  
   // Cartesian callbacks
   void equilibriumPoseCallback(const geometry_msgs::PoseStampedConstPtr& msg);
   void equilibriumConfigurationCallback(const std_msgs::Float32MultiArray::ConstPtr& joint);
@@ -146,6 +143,13 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   double startup_duration_{1.0}; // Increased time for smoother startup
   ros::Time startup_time_;
   
+  // Trajectory interpolation structures
+  struct TrajectoryPoint {
+    std::array<double, 7> position;
+    std::array<double, 7> velocity;
+    double timestamp;
+  };
+  
   // Trajectory interpolation variables
   std::vector<TrajectoryPoint> trajectory_buffer_;
   bool trajectory_active_{false};
@@ -160,13 +164,6 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   realtime_tools::RealtimePublisher<franka_example_controllers::JointTorqueComparison>
       torques_publisher_;
   franka_hw::TriggerRate rate_trigger_{1.0};
-  
-  // Trajectory interpolation structures
-  struct TrajectoryPoint {
-    std::array<double, 7> position;
-    std::array<double, 7> velocity;
-    double timestamp;
-  };
   // Joint impedance trajectory functions
   void addTrajectoryPoint(const std::array<double, 7>& position, 
                          const std::array<double, 7>& velocity);
@@ -194,7 +191,7 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   Eigen::Matrix<double, 7, 1> q_d_start_;
   Eigen::Matrix<double, 7, 1> q_d_end_;
   Eigen::Matrix<double, 7, 1> q_d_current_;
-  ros::Time trajectory_start_time_;
+  // Using the already declared trajectory_start_time_ for both purposes
   bool trajectory_in_progress_{false};
 
   // Trajectory interpolation
