@@ -62,6 +62,9 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Subscriber sub_equilibrium_pose_;
   ros::Subscriber sub_equilibrium_config_;
   
+  // Cartesian publishers
+  ros::Publisher pub_cartesian_pose_;
+  
   // Cartesian callbacks
   void equilibriumPoseCallback(const geometry_msgs::PoseStampedConstPtr& msg);
   void equilibriumConfigurationCallback(const std_msgs::Float32MultiArray::ConstPtr& joint);

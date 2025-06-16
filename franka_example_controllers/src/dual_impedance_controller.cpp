@@ -90,6 +90,9 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
       "/equilibrium_configuration", 20, &DualImpedanceController::equilibriumConfigurationCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
 
+  // Publisher for current cartesian pose
+  pub_cartesian_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/cartesian_pose", 1);
+
   // Initialize Joint impedance parameters exactly like original
   joint_command_sub_ = node_handle.subscribe(
       "/joint_command", 1, &DualImpedanceController::jointCommandCallback, this,
@@ -157,6 +160,19 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     Eigen::Vector3d position(transform.translation());
     Eigen::Quaterniond orientation(transform.linear());
 
+    // Publish current cartesian pose
+    geometry_msgs::PoseStamped pose_msg;
+    pose_msg.header.frame_id = "panda_link0";
+    pose_msg.header.stamp = ros::Time::now();
+    pose_msg.pose.position.x = position[0];
+    pose_msg.pose.position.y = position[1];
+    pose_msg.pose.position.z = position[2];
+    pose_msg.pose.orientation.x = orientation.x();
+    pose_msg.pose.orientation.y = orientation.y();
+    pose_msg.pose.orientation.z = orientation.z();
+    pose_msg.pose.orientation.w = orientation.w();
+    pub_cartesian_pose_.publish(pose_msg);
+
     // Compute pose error exactly like original
     Eigen::Matrix<double, 6, 1> error;
     error.head(3) << position - position_d_;
@@ -190,6 +206,25 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     // ============ JOINT IMPEDANCE MODE ============ 
     // Simple joint impedance exactly like original
     
+    // First, publish current cartesian pose (even in joint mode)
+    Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+    Eigen::Vector3d position(transform.translation());
+    Eigen::Quaterniond orientation(transform.linear());
+    
+    // Publish current pose
+    geometry_msgs::PoseStamped pose_msg;
+    pose_msg.header.frame_id = "panda_link0";
+    pose_msg.header.stamp = ros::Time::now();
+    pose_msg.pose.position.x = position[0];
+    pose_msg.pose.position.y = position[1];
+    pose_msg.pose.position.z = position[2];
+    pose_msg.pose.orientation.x = orientation.x();
+    pose_msg.pose.orientation.y = orientation.y();
+    pose_msg.pose.orientation.z = orientation.z();
+    pose_msg.pose.orientation.w = orientation.w();
+    pub_cartesian_pose_.publish(pose_msg);
+    
+    // Compute joint impedance control
     for (size_t i = 0; i < 7; ++i) {
       double position_error = q_d_array_[i] - q[i];
       tau_d[i] = k_gains_[i] * position_error - d_gains_[i] * dq[i];
@@ -209,9 +244,11 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 }
 
 void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) {
-  is_cartesian_mode_ = msg->data;
+  if (msg->data != is_cartesian_mode_) {is_cartesian_mode_ = msg->data;
   ROS_INFO("DualImpedanceController: Switched to %s mode", 
            is_cartesian_mode_ ? "Cartesian" : "Joint");
+  }
+  
 }
 
 Eigen::Matrix<double, 7, 1> DualImpedanceController::saturateTorqueRate(
