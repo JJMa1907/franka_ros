@@ -37,11 +37,6 @@
           args="load dynamic_reconfigure_compliance_param_node $(find franka_example_controllers)/config/franka_example_controller.yaml"
           launch-prefix="bash -c 'sleep 2.0; $0 $@'" />
 
-    <!-- Mode switcher service -->
-    <node name="dual_mode_switcher" pkg="franka_example_controllers" type="dual_mode_switcher.py" output="screen">
-      <param name="default_mode" value="$(arg start_mode)" />
-    </node>
-
     <!-- Start rviz with appropriate config if requested -->
     <node name="rviz" pkg="rviz" type="rviz" output="screen" 
           args="-d $(find franka_example_controllers)/launch/rviz/franka_description_with_marker.rviz" 
