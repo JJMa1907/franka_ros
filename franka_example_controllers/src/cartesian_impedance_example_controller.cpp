@@ -110,8 +110,6 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
 
   position_d_.setZero();
   orientation_d_.coeffs() << 0.0, 0.0, 0.0, 1.0;
-  //position_d_target_.setZero();
-  //orientation_d_target_.coeffs() << 0.0, 0.0, 0.0, 1.0;
   cartesian_stiffness_.setZero();
   cartesian_damping_.setZero();
 
@@ -401,8 +399,6 @@ void CartesianImpedanceExampleController::complianceParamCallback(
   cartesian_damping_target_(5,5)=2.0 * sqrt(config.rotational_stiffness_Z);
   nullspace_stiffness_target_ = config.nullspace_stiffness;
 }
-
-
 
 void CartesianImpedanceExampleController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {

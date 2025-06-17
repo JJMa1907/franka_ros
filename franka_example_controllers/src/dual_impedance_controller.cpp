@@ -406,6 +406,12 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     pose_msg.pose.orientation.w = orientation.w();
     pub_cartesian_pose_.publish(pose_msg);
 
+    // Optional: less frequent debug output to avoid affecting real-time performance
+    // ROS_INFO_STREAM_THROTTLE(1.0, "DualImpedanceController: Current Cartesian pose: "
+    //                 << "Position: [" << position[0] << ", " << position[1] << ", " << position[2] << "], "
+    //                 << "Orientation: [" << orientation.x() << ", " << orientation.y() << ", "
+    //                 << orientation.z() << ", " << orientation.w() << "]");
+
     // Enhanced pose error computation with clamping
     Eigen::Matrix<double, 6, 1> error;
     error.head(3) << position - position_d_;
@@ -462,6 +468,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     
     // Apply torque rate saturation for cartesian mode
     tau_d = saturateTorqueRate(tau_d, tau_J_d);
+    
     // Update cartesian parameters for real-time adjustment (critical for dynamic reconfigure and stiffness updates)
     cartesian_stiffness_ = cartesian_stiffness_target_;
     cartesian_damping_ = cartesian_damping_target_;
@@ -611,11 +618,16 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     // Enhanced torque rate saturation for joint impedance mode
     std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
 
-    // Set joint commands for joint mode
+    // Store torques in tau_d for unified command setting
     for (size_t i = 0; i < 7; ++i) {
-      joint_handles_[i].setCommand(tau_d_saturated[i]);
-      tau_d[i] = tau_d_saturated[i]; // Store for last_tau_d_ update
+      tau_d[i] = tau_d_saturated[i];
     }
+  }
+
+  // ============ UNIFIED JOINT COMMAND SETTING ============
+  // Set joint commands for both cartesian and joint modes
+  for (size_t i = 0; i < 7; ++i) {
+    joint_handles_[i].setCommand(tau_d[i]);
   }
 
   // ============ COMMON OPERATIONS FOR BOTH MODES ============
@@ -1108,8 +1120,14 @@ void DualImpedanceController::complianceParamCallback(
 }
 
 // Enhanced equilibrium pose callback with orientation continuity
-void DualImpedanceController::equilibriumPoseCallback(
-    const geometry_msgs::PoseStampedConstPtr& msg) {
+void DualImpedanceController::equilibriumPoseCallback( const geometry_msgs::PoseStampedConstPtr& msg) {
+  if(!is_cartesian_mode_)
+  {
+    ROS_WARN("Received equilibrium pose in joint mode, ignoring");
+    return;
+  }
+
+  ROS_INFO("Received equilibrium pose in Cartesian mode, updating target pose");
   position_d_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
   Eigen::Quaterniond last_orientation_d_(orientation_d_);
   orientation_d_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
