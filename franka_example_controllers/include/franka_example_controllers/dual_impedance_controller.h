@@ -93,6 +93,7 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Publisher pub_stiff_update_;
   ros::Publisher pub_cartesian_pose_;
   ros::Publisher pub_force_torque_;
+  ros::Publisher pub_impedance_mode_;
   
   // Dynamic reconfigure for cartesian mode
   std::unique_ptr<dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>>

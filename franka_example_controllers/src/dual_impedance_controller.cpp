@@ -47,6 +47,8 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   pub_cartesian_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/cartesian_pose", 1);
   
   pub_force_torque_ = node_handle.advertise<geometry_msgs::WrenchStamped>("/force_torque_ext", 1);
+  
+  pub_impedance_mode_ = node_handle.advertise<std_msgs::Bool>("/impedance_mode_status", 1);
 
   // Dynamic reconfigure server
   dynamic_reconfigure_compliance_param_node_ =
@@ -303,6 +305,11 @@ void DualImpedanceController::starting(const ros::Time& time) {
       initializeCartesianStiffness();
     }
   }
+  
+  // Publish initial mode status
+  std_msgs::Bool mode_status;
+  mode_status.data = is_cartesian_mode_;
+  pub_impedance_mode_.publish(mode_status);
 }
 
 void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
@@ -608,6 +615,11 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
     
     ROS_INFO("DualImpedanceController: Switched to %s mode", 
              is_cartesian_mode_ ? "Cartesian" : "Joint");
+    
+    // Publish mode status
+    std_msgs::Bool mode_status;
+    mode_status.data = is_cartesian_mode_;
+    pub_impedance_mode_.publish(mode_status);
   }
 }
 
