@@ -318,6 +318,22 @@ void DualImpedanceController::starting(const ros::Time& time) {
   startup_phase_ = true;
   startup_time_ = ros::Time(0); // Reset to zero to indicate it needs initialization
   first_command_ = true; // Reset first command flag for ramp-up
+  
+  // Initialize Cartesian stiffness if starting in Cartesian mode and not already initialized
+  if (is_cartesian_mode_) {
+    bool is_stiffness_initialized = false;
+    for (int i = 0; i < 6; ++i) {
+      if (cartesian_stiffness_target_(i, i) > 0.0) {
+        is_stiffness_initialized = true;
+        break;
+      }
+    }
+    
+    if (!is_stiffness_initialized) {
+      ROS_INFO("DualImpedanceController: Starting in Cartesian mode, initializing stiffness with default values");
+      initializeCartesianStiffness();
+    }
+  }
 }
 
 void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
@@ -630,11 +646,50 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 }
 
 void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) {
-  if (msg->data != is_cartesian_mode_) {is_cartesian_mode_ = msg->data;
-  ROS_INFO("DualImpedanceController: Switched to %s mode", 
-           is_cartesian_mode_ ? "Cartesian" : "Joint");
+  if (msg->data != is_cartesian_mode_) {
+    is_cartesian_mode_ = msg->data;
+    
+    // When switching to Cartesian mode, check if stiffness is initialized
+    if (is_cartesian_mode_) {
+      bool is_stiffness_initialized = false;
+      for (int i = 0; i < 6; ++i) {
+        if (cartesian_stiffness_target_(i, i) > 0.0) {
+          is_stiffness_initialized = true;
+          break;
+        }
+      }
+      
+      if (!is_stiffness_initialized) {
+        ROS_INFO("DualImpedanceController: Switching to Cartesian mode, initializing stiffness with default values");
+        initializeCartesianStiffness();
+      }
+    }
+    
+    ROS_INFO("DualImpedanceController: Switched to %s mode", 
+             is_cartesian_mode_ ? "Cartesian" : "Joint");
   }
+}
+
+void DualImpedanceController::initializeCartesianStiffness() {
+  // Set reasonable default stiffness values (same as dynamic reconfigure defaults)
+  cartesian_stiffness_target_.setIdentity();
+  cartesian_stiffness_target_(0,0) = 400.0;  // Default translational stiffness X
+  cartesian_stiffness_target_(1,1) = 400.0;  // Default translational stiffness Y  
+  cartesian_stiffness_target_(2,2) = 400.0;  // Default translational stiffness Z
+  cartesian_stiffness_target_(3,3) = 30.0;   // Default rotational stiffness X
+  cartesian_stiffness_target_(4,4) = 30.0;   // Default rotational stiffness Y
+  cartesian_stiffness_target_(5,5) = 30.0;   // Default rotational stiffness Z
   
+  // Set corresponding damping (critical damping)
+  cartesian_damping_target_(0,0) = 2.0 * sqrt(400.0);
+  cartesian_damping_target_(1,1) = 2.0 * sqrt(400.0);
+  cartesian_damping_target_(2,2) = 2.0 * sqrt(400.0);
+  cartesian_damping_target_(3,3) = 2.0 * sqrt(30.0);
+  cartesian_damping_target_(4,4) = 2.0 * sqrt(30.0);
+  cartesian_damping_target_(5,5) = 2.0 * sqrt(30.0);
+  
+  // Set nullspace stiffness
+  nullspace_stiffness_target_ = 0.0; // Default from dynamic reconfigure
 }
 
 Eigen::Matrix<double, 7, 1> DualImpedanceController::saturateTorqueRate(

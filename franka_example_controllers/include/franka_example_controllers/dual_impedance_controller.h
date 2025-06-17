@@ -56,6 +56,9 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Subscriber mode_sub_;
   void modeCallback(const std_msgs::Bool::ConstPtr& msg);
 
+  // Helper function to initialize Cartesian stiffness with default values
+  void initializeCartesianStiffness();
+
   // Saturation
   Eigen::Matrix<double, 7, 1> saturateTorqueRate(
       const Eigen::Matrix<double, 7, 1>& tau_d_calculated,
