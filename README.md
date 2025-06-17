@@ -60,6 +60,10 @@ roslaunch franka_example_controllers joint_impedance_unified.launch load_gripper
 rostopic pub test
 
 ``` shell
+rostopic pub /joint_command std_msgs/Float64MultiArray "data: [0.21937448498853018, 0.1383980017689663, 0.04700368355125891, -2.022921479594973, -0., 1.2, 0.5]"
+```
+
+``` shell
 rostopic pub /joint_impedance_example_controller/joint_command std_msgs/Float64MultiArray "data: [1., -0.16, -0.23, -1.96, -0.152, 1.8, 1.98, 0.04, 0.04]"
 ```
 ## some issues may 
