@@ -50,6 +50,10 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   
   pub_impedance_mode_status_ = node_handle.advertise<std_msgs::Bool>("/impedance_mode_status", 1);
 
+  // Initialize timer for periodic impedance mode status publishing (1Hz)
+  impedance_mode_status_timer_ = node_handle.createTimer(
+      ros::Duration(1.0), &DualImpedanceController::publishImpedanceModeStatus, this);
+
   // Dynamic reconfigure server
   dynamic_reconfigure_compliance_param_node_ =
       ros::NodeHandle("dynamic_reconfigure_compliance_param_node");
@@ -586,13 +590,6 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     torques_publisher_.unlockAndPublish();
   }
 
-  // Publish current impedance mode status
-  if (rate_trigger_()) {
-    std_msgs::Bool mode_msg;
-    mode_msg.data = is_cartesian_mode_;
-    pub_impedance_mode_status_.publish(mode_msg);
-  }
-
   // Update last commanded torques (common for both modes)
   std::array<double, 7> gravity = model_handle_->getGravity();
   for (size_t i = 0; i < 7; ++i) {
@@ -1082,6 +1079,12 @@ void DualImpedanceController::equilibriumConfigurationCallback(
       i++;
     }
   }
+}
+
+void DualImpedanceController::publishImpedanceModeStatus(const ros::TimerEvent& /*event*/) {
+  std_msgs::Bool mode_status;
+  mode_status.data = is_cartesian_mode_;
+  pub_impedance_mode_status_.publish(mode_status);
 }
 }  // namespace franka_example_controllers
 

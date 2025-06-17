@@ -95,6 +95,9 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Publisher pub_force_torque_;
   ros::Publisher pub_impedance_mode_status_;
   
+  // Timer for periodic impedance mode status publishing
+  ros::Timer impedance_mode_status_timer_;
+  
   // Dynamic reconfigure for cartesian mode
   std::unique_ptr<dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>>
       dynamic_server_compliance_param_;
@@ -106,6 +109,9 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   void equilibriumStiffnessCallback(const std_msgs::Float32MultiArray::ConstPtr& stiffness);
   void complianceParamCallback(franka_example_controllers::compliance_paramConfig& config,
                                uint32_t level);
+  
+  // Timer callback for periodic impedance mode status publishing
+  void publishImpedanceModeStatus(const ros::TimerEvent& event);
 
   // Joint Impedance Variables
   std::vector<double> k_gains_;
