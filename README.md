@@ -217,7 +217,7 @@ rostopic pub /impedance_mode std_msgs/Bool "data: false" -1
 
 ```bash
 # 格式：[q1, q2, q3, q4, q5, q6, q7] - 目标关节位置
-rostopic pub /dual_impedance_controller/joint_command std_msgs/Float64MultiArray "data: [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]" -1
+rostopic pub /joint_command std_msgs/Float64MultiArray "data: [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]" -1
 ```
 
 #### 监控
