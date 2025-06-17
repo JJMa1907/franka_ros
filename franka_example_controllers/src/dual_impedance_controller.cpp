@@ -48,7 +48,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   
   pub_force_torque_ = node_handle.advertise<geometry_msgs::WrenchStamped>("/force_torque_ext", 1);
   
-  pub_impedance_mode_ = node_handle.advertise<std_msgs::Bool>("/impedance_mode_status", 1);
+  pub_impedance_mode_status_ = node_handle.advertise<std_msgs::Bool>("/impedance_mode_status", 1);
 
   // Dynamic reconfigure server
   dynamic_reconfigure_compliance_param_node_ =
@@ -309,7 +309,7 @@ void DualImpedanceController::starting(const ros::Time& time) {
   // Publish initial mode status
   std_msgs::Bool mode_status;
   mode_status.data = is_cartesian_mode_;
-  pub_impedance_mode_.publish(mode_status);
+  pub_impedance_mode_status_.publish(mode_status);
 }
 
 void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
@@ -586,6 +586,13 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     torques_publisher_.unlockAndPublish();
   }
 
+  // Publish current impedance mode status
+  if (rate_trigger_()) {
+    std_msgs::Bool mode_msg;
+    mode_msg.data = is_cartesian_mode_;
+    pub_impedance_mode_status_.publish(mode_msg);
+  }
+
   // Update last commanded torques (common for both modes)
   std::array<double, 7> gravity = model_handle_->getGravity();
   for (size_t i = 0; i < 7; ++i) {
@@ -619,7 +626,7 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
     // Publish mode status
     std_msgs::Bool mode_status;
     mode_status.data = is_cartesian_mode_;
-    pub_impedance_mode_.publish(mode_status);
+    pub_impedance_mode_status_.publish(mode_status);
   }
 }
 
