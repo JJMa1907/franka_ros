@@ -16,35 +16,65 @@ namespace franka_example_controllers {
 
 bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
                                   ros::NodeHandle& node_handle) {
-  // Initialize mode flag - default to cartesian
   is_cartesian_mode_ = true;
-  
-  // Simple mode subscriber
+
+  // ============ ROS TOPICS AND SERVICES ============
+  // Subscribers
   mode_sub_ = node_handle.subscribe(
       "/impedance_mode", 1, &DualImpedanceController::modeCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
   
-  // Get arm_id parameter
+  sub_equilibrium_pose_ = node_handle.subscribe(
+      "/equilibrium_pose", 20, &DualImpedanceController::equilibriumPoseCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+  
+  sub_equilibrium_config_ = node_handle.subscribe(
+      "/equilibrium_configuration", 20, &DualImpedanceController::equilibriumConfigurationCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+  
+  sub_stiffness_ = node_handle.subscribe(
+      "/stiffness", 20, &DualImpedanceController::equilibriumStiffnessCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+  
+  joint_command_sub_ = node_handle.subscribe(
+      "/joint_command", 1, &DualImpedanceController::jointCommandCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+
+  // Publishers
+  pub_stiff_update_ = node_handle.advertise<dynamic_reconfigure::Config>(
+      "/dynamic_reconfigure_compliance_param_node/parameter_updates", 5);
+  
+  pub_cartesian_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/cartesian_pose", 1);
+  
+  pub_force_torque_ = node_handle.advertise<geometry_msgs::WrenchStamped>("/force_torque_ext", 1);
+
+  // Dynamic reconfigure server
+  dynamic_reconfigure_compliance_param_node_ =
+      ros::NodeHandle("dynamic_reconfigure_compliance_param_node");
+  dynamic_server_compliance_param_.reset(
+      new dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>(
+          dynamic_reconfigure_compliance_param_node_));
+  dynamic_server_compliance_param_->setCallback(
+      boost::bind(&DualImpedanceController::complianceParamCallback, this, _1, _2));
+
+  // ============ PARAMETER LOADING ============
   std::string arm_id;
   if (!node_handle.getParam("arm_id", arm_id)) {
     ROS_ERROR_STREAM("DualImpedanceController: Could not read parameter arm_id");
     return false;
   }
   
-  // Get joint names
   std::vector<std::string> joint_names;
   if (!node_handle.getParam("joint_names", joint_names) || joint_names.size() != 7) {
     ROS_ERROR("DualImpedanceController: Invalid or no joint_names parameters provided!");
     return false;
   }
 
-  // ============ JOINT IMPEDANCE ENHANCED PARAMETERS ============
-  // Initialize joint stiffness and damping with default values from deoxys config
+  // Joint impedance parameters
   std::vector<double> joint_kp = {300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0};
   std::vector<double> joint_kd = {20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0};
   std::vector<double> max_delta_q = {0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06};
   
-  // Try to get parameters from param server if available
   node_handle.getParam("joint_kp", joint_kp);
   node_handle.getParam("joint_kd", joint_kd);
   node_handle.getParam("max_delta_q", max_delta_q);
@@ -73,26 +103,20 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   // Initialize smoothed state variables
   position_smoothed_.fill(0.0);
   velocity_smoothed_.fill(0.0);
-  // Copy values from max_delta_q vector to the fixed-size array max_delta_q_
   for (size_t i = 0; i < 7; ++i) {
     max_delta_q_[i] = max_delta_q[i];
   }
 
   if (!node_handle.getParam("coriolis_factor", coriolis_factor_)) {
-    ROS_INFO_STREAM("DualImpedanceController: coriolis_factor not found. Defaulting to "
-                    << coriolis_factor_);
+    coriolis_factor_ = 1.0;
   }
 
-  // Check if external command mode should be enabled
   if (!node_handle.getParam("use_external_command", use_external_command_)) {
-    ROS_INFO_STREAM("DualImpedanceController: use_external_command not found. Defaulting to "
-                    << use_external_command_);
+    use_external_command_ = false;
   }
 
-  // Check if delta mode should be enabled (deoxys is_delta config)
   if (!node_handle.getParam("is_delta", is_delta_)) {
-    ROS_INFO_STREAM("DualImpedanceController: is_delta not found. Defaulting to "
-                    << is_delta_);
+    is_delta_ = false;
   }
 
   // Initialize joint limits (deoxys-compatible)
@@ -113,42 +137,27 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   }
   
   if (!node_handle.getParam("joint_limit_margin", joint_limit_margin_)) {
-    ROS_INFO_STREAM("DualImpedanceController: joint_limit_margin not found. Defaulting to "
-                    << joint_limit_margin_);
+    joint_limit_margin_ = 0.1;
   }
 
-  // Load power and torque limits for power_limit_violation prevention
   if (!node_handle.getParam("power_limit", power_limit_)) {
-    ROS_INFO_STREAM("DualImpedanceController: power_limit not found. Defaulting to "
-                    << power_limit_);
+    power_limit_ = 37.0;
   }
-  
-  // Set more conservative power limit during startup
-  power_limit_startup_ = power_limit_ * 0.7; // 70% of normal power limit during startup
-  if (!node_handle.getParam("power_limit_startup", power_limit_startup_)) {
-    ROS_INFO_STREAM("DualImpedanceController: power_limit_startup not found. Defaulting to "
-                    << power_limit_startup_);
-  }
+  power_limit_startup_ = power_limit_ * 0.7;
+  node_handle.getParam("power_limit_startup", power_limit_startup_);
   
   if (!node_handle.getParam("tau_limit", tau_limit_)) {
-    ROS_INFO_STREAM("DualImpedanceController: tau_limit not found. Defaulting to "
-                    << tau_limit_);
+    tau_limit_ = 87.0;
   }
   
   if (!node_handle.getParam("startup_duration", startup_duration_)) {
-    ROS_INFO_STREAM("DualImpedanceController: startup_duration not found. Defaulting to "
-                    << startup_duration_);
+    startup_duration_ = 2.0;
   }
 
-  // Initialize rate trigger for publishing
   double publish_rate(30.0);
-  if (!node_handle.getParam("publish_rate", publish_rate)) {
-    ROS_INFO_STREAM("DualImpedanceController: publish_rate not found. Defaulting to "
-                    << publish_rate);
-  }
+  node_handle.getParam("publish_rate", publish_rate);
   rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
-  // Initialize hardware interfaces exactly like original controllers
   franka_hw::FrankaModelInterface* model_interface =
       robot_hw->get<franka_hw::FrankaModelInterface>();
   if (model_interface == nullptr) {
@@ -192,51 +201,11 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
     }
   }
 
-  // Initialize Cartesian impedance parameters exactly like original
-  sub_equilibrium_pose_ = node_handle.subscribe(
-      "/equilibrium_pose", 20, &DualImpedanceController::equilibriumPoseCallback, this,
-      ros::TransportHints().reliable().tcpNoDelay());
-  sub_equilibrium_config_ = node_handle.subscribe(
-      "/equilibrium_configuration", 20, &DualImpedanceController::equilibriumConfigurationCallback, this,
-      ros::TransportHints().reliable().tcpNoDelay());
-  
-  // Enhanced cartesian impedance features from cartesian_impedance_example_controller
-  sub_stiffness_ = node_handle.subscribe(
-      "/stiffness", 20, &DualImpedanceController::equilibriumStiffnessCallback, this,
-      ros::TransportHints().reliable().tcpNoDelay());
-
-  pub_stiff_update_ = node_handle.advertise<dynamic_reconfigure::Config>(
-      "/dynamic_reconfigure_compliance_param_node/parameter_updates", 5);
-
-  pub_cartesian_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/cartesian_pose", 1);
-
-  pub_force_torque_ = node_handle.advertise<geometry_msgs::WrenchStamped>("/force_torque_ext", 1);
-
-  // Initialize dynamic reconfigure for cartesian mode
-  dynamic_reconfigure_compliance_param_node_ =
-      ros::NodeHandle("dynamic_reconfigure_compliance_param_node");
-
-  dynamic_server_compliance_param_.reset(
-      new dynamic_reconfigure::Server<franka_example_controllers::compliance_paramConfig>(
-          dynamic_reconfigure_compliance_param_node_));
-  dynamic_server_compliance_param_->setCallback(
-      boost::bind(&DualImpedanceController::complianceParamCallback, this, _1, _2));
-
-  // Publisher for current cartesian pose
-  pub_cartesian_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/cartesian_pose", 1);
-
-  // Initialize Joint impedance parameters exactly like original
-  joint_command_sub_ = node_handle.subscribe(
-      "/joint_command", 1, &DualImpedanceController::jointCommandCallback, this,
-      ros::TransportHints().reliable().tcpNoDelay());
-
-  // Set default parameters exactly like original controllers
-  cartesian_stiffness_.setZero();  // 改为零矩阵，更安全
-  cartesian_damping_.setZero();    // 改为零矩阵，更安全
-  
-  // Initialize enhanced cartesian variables
-  cartesian_stiffness_target_.setZero();  // 改为零矩阵初始化
-  cartesian_damping_target_.setZero();    // 改为零矩阵初始化
+  // ============ CONTROLLER INITIALIZATION ============
+  cartesian_stiffness_.setZero();
+  cartesian_damping_.setZero();
+  cartesian_stiffness_target_.setZero();
+  cartesian_damping_target_.setZero();
   
   // Initialize force/torque estimation variables
   force_torque_.setZero();
@@ -337,12 +306,10 @@ void DualImpedanceController::starting(const ros::Time& time) {
 }
 
 void DualImpedanceController::update(const ros::Time& time, const ros::Duration& period) {
-  // Get state variables exactly like original controllers
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
   std::array<double, 42> jacobian_array = model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
 
-  // Convert to Eigen
   Eigen::Map<Eigen::Matrix<double, 7, 1> > coriolis(coriolis_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7> > jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1> > q(robot_state.q.data());
@@ -352,8 +319,6 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
   Eigen::VectorXd tau_d(7);
 
   if (is_cartesian_mode_) {
-    // ============ ENHANCED CARTESIAN IMPEDANCE MODE ============
-    // Enhanced implementation based on cartesian_impedance_example_controller
     
     std::array<double, 49> mass_array = model_handle_->getMass();
     Eigen::Map<Eigen::Matrix<double, 7, 7> > mass(mass_array.data());
@@ -406,23 +371,15 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     pose_msg.pose.orientation.w = orientation.w();
     pub_cartesian_pose_.publish(pose_msg);
 
-    // Optional: less frequent debug output to avoid affecting real-time performance
-    // ROS_INFO_STREAM_THROTTLE(1.0, "DualImpedanceController: Current Cartesian pose: "
-    //                 << "Position: [" << position[0] << ", " << position[1] << ", " << position[2] << "], "
-    //                 << "Orientation: [" << orientation.x() << ", " << orientation.y() << ", "
-    //                 << orientation.z() << ", " << orientation.w() << "]");
-
-    // Enhanced pose error computation with clamping
+    // Pose error computation
     Eigen::Matrix<double, 6, 1> error;
     error.head(3) << position - position_d_;
     
-    // Apply stiffness distance clamping
     double stiffness_distance = 0.04;
     error[0] = std::min(std::max(error[0], -stiffness_distance), stiffness_distance);
     error[1] = std::min(std::max(error[1], -stiffness_distance), stiffness_distance);
     error[2] = std::min(std::max(error[2], -stiffness_distance), stiffness_distance);
 
-    // Orientation error exactly like original
     if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
       orientation.coeffs() << -orientation.coeffs();
     }
@@ -430,7 +387,6 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     Eigen::AngleAxisd error_quaternion_angle_axis(error_quaternion);
     error.tail(3) << error_quaternion_angle_axis.axis() * error_quaternion_angle_axis.angle();
 
-    // Compute control with enhanced nullspace handling
     Eigen::VectorXd tau_task(7), tau_nullspace(7), null_vect(7), tau_joint_limit(7);
     
     Eigen::MatrixXd Null_mat = Eigen::MatrixXd::Identity(7, 7) - jacobian.transpose() * jacobian_transpose_pinv;
@@ -440,14 +396,10 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       null_vect(i) = q_d_nullspace_(i) - q(i);
     }
 
-    // Cartesian PD control with enhanced damping
     tau_task << jacobian.transpose() * (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
-    
-    // Nullspace PD control with double critical damping
     tau_nullspace << Null_mat * (nullspace_stiffness_ * null_vect - 
                                  2.0 * sqrt(nullspace_stiffness_) * dq);
     
-    // Enhanced joint limit protection
     tau_joint_limit.setZero();
     if (q(0) > 2.85)   { tau_joint_limit(0) = -10; }
     if (q(0) < -2.85)  { tau_joint_limit(0) = +10; }
@@ -465,52 +417,37 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     if (q(6) < -2.8)   { tau_joint_limit(6) = +10; }
     
     tau_d << tau_task + tau_nullspace + coriolis + tau_joint_limit;
-    
-    // Apply torque rate saturation for cartesian mode
     tau_d = saturateTorqueRate(tau_d, tau_J_d);
     
-    // Update cartesian parameters for real-time adjustment (critical for dynamic reconfigure and stiffness updates)
     cartesian_stiffness_ = cartesian_stiffness_target_;
     cartesian_damping_ = cartesian_damping_target_;
     nullspace_stiffness_ = nullspace_stiffness_target_;
     
-    // Ensure orientation continuity (from original cartesian controller)
     Eigen::AngleAxisd aa_orientation_d(orientation_d_);
     orientation_d_ = Eigen::Quaterniond(aa_orientation_d);
     
   } else {
-    // ============ JOINT IMPEDANCE MODE - ENHANCED ============ 
-    // Enhanced joint impedance with all features from joint_impedance_example_controller
-    
-    // Prevent the shaking issue when starting the controller by implementing a smooth startup
+    // Joint impedance mode
     double startup_factor = 1.0;
     
     if (startup_phase_) {
-      // Initialize on first update cycle
       if (startup_time_.isZero()) {
         startup_time_ = time;
         for (size_t i = 0; i < 7; ++i) {
           initial_position_[i] = robot_state.q[i];
         }
-        ROS_INFO("Joint impedance controller starting with smooth ramp-up over %.1f seconds", startup_duration_);
       }
       
-      // Calculate time elapsed since controller start
       double time_elapsed = (time - startup_time_).toSec();
-      
-      // Use a quadratic ramp-up instead of linear for even smoother transition
       double normalized_time = time_elapsed / startup_duration_;
       startup_factor = std::min(normalized_time * normalized_time, 1.0);
       
-      // Exit startup phase after startup_duration_ seconds
       if (time_elapsed > startup_duration_) {
         startup_phase_ = false;
         startup_factor = 1.0;
-        ROS_INFO("Joint impedance controller startup complete");
       }
     }
 
-    // Apply exponential smoothing to measurements for state estimation
     for (size_t i = 0; i < 7; i++) {
       position_smoothed_[i] = alpha_q_ * robot_state.q[i] + (1.0 - alpha_q_) * position_smoothed_[i];
       velocity_smoothed_[i] = alpha_dq_ * robot_state.dq[i] + (1.0 - alpha_dq_) * velocity_smoothed_[i];
@@ -597,42 +534,34 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       // Limit the maximum torque magnitude to tau_limit_
       control_torque = std::max(std::min(control_torque, tau_limit_), -tau_limit_);
       
-      // Final commanded torque
       tau_d_calculated[i] = control_torque;
       
-      // Joint limit protection (deoxys-compatible)
       double dist_to_upper = joint_limits_upper_[i] - current_q;
       double dist_to_lower = current_q - joint_limits_lower_[i];
       
       if (dist_to_upper < joint_limit_margin_ && tau_d_calculated[i] > 0.0) {
-        tau_d_calculated[i] = 0.0;  // Disable positive torque near upper limit
+        tau_d_calculated[i] = 0.0;
       }
       if (dist_to_lower < joint_limit_margin_ && tau_d_calculated[i] < 0.0) {
-        tau_d_calculated[i] = 0.0;  // Disable negative torque near lower limit
+        tau_d_calculated[i] = 0.0;
       }
       
-      // Add coriolis compensation
       tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
     }
 
-    // Enhanced torque rate saturation for joint impedance mode
     std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
 
-    // Store torques in tau_d for unified command setting
     for (size_t i = 0; i < 7; ++i) {
       tau_d[i] = tau_d_saturated[i];
     }
   }
 
-  // ============ UNIFIED JOINT COMMAND SETTING ============
-  // Set joint commands for both cartesian and joint modes
+  // Set joint commands
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d[i]);
   }
 
-  // ============ COMMON OPERATIONS FOR BOTH MODES ============
-  
-  // Publish torque comparison data (enhanced from joint_impedance_example_controller)
+  // Publish torque data
   if (rate_trigger_() && torques_publisher_.trylock()) {
     std::array<double, 7> tau_j = robot_state.tau_J;
     std::array<double, 7> tau_error;
@@ -715,32 +644,24 @@ Eigen::Matrix<double, 7, 1> DualImpedanceController::saturateTorqueRate(
   return tau_d_saturated;
 }
 
-// ============ ENHANCED JOINT IMPEDANCE FUNCTIONS ============
-// Enhanced saturation for joint impedance mode (from joint_impedance_example_controller)
 std::array<double, 7> DualImpedanceController::saturateTorqueRateJoint(
     const std::array<double, 7>& tau_d_calculated,
     const std::array<double, 7>& tau_J_d) {
   std::array<double, 7> tau_d_saturated{};
   
-  // Use variable torque rate limits based on controller state
   double delta_tau_max = kDeltaTauMax;
   
-  // For startup phase or first command, use much lower torque rate limit
   if (startup_phase_ || first_command_) {
-    delta_tau_max = kDeltaTauMax * 0.4; // 40% of normal limit during startup
-    first_command_ = false; // Clear first command flag
+    delta_tau_max = kDeltaTauMax * 0.4;
+    first_command_ = false;
   }
   
-  // Calculate estimated mechanical power after applying rate limiting
   double total_power = 0.0;
   std::array<double, 7> rate_limited_tau;
   
-  // First calculate rate-limited torques
   for (size_t i = 0; i < 7; i++) {
     double difference = tau_d_calculated[i] - tau_J_d[i];
     rate_limited_tau[i] = tau_J_d[i] + std::max(std::min(difference, delta_tau_max), -delta_tau_max);
-    
-    // P = τ * ω (torque * angular velocity)
     total_power += std::abs(rate_limited_tau[i] * dq_filtered_[i]);
   }
   
@@ -1119,15 +1040,11 @@ void DualImpedanceController::complianceParamCallback(
   nullspace_stiffness_target_ = config.nullspace_stiffness;
 }
 
-// Enhanced equilibrium pose callback with orientation continuity
-void DualImpedanceController::equilibriumPoseCallback( const geometry_msgs::PoseStampedConstPtr& msg) {
-  if(!is_cartesian_mode_)
-  {
-    ROS_WARN("Received equilibrium pose in joint mode, ignoring");
+void DualImpedanceController::equilibriumPoseCallback(const geometry_msgs::PoseStampedConstPtr& msg) {
+  if(!is_cartesian_mode_) {
     return;
   }
 
-  ROS_INFO("Received equilibrium pose in Cartesian mode, updating target pose");
   position_d_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
   Eigen::Quaterniond last_orientation_d_(orientation_d_);
   orientation_d_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
