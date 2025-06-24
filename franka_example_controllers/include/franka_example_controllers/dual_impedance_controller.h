@@ -94,6 +94,7 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Publisher pub_cartesian_pose_;
   ros::Publisher pub_force_torque_;
   ros::Publisher pub_impedance_mode_status_;
+  ros::Publisher pub_camera_pose_;
   
   // Timer for periodic impedance mode status publishing
   ros::Timer impedance_mode_status_timer_;
@@ -212,6 +213,13 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   
   // Safety protection at startup
   void startupProtection();
+  
+  // Camera pose calculation and publishing
+  void publishCameraPose(const Eigen::Affine3d& link8_transform);
+  
+  // Camera transformation from link8 to camera base (based on URDF)
+  // <origin xyz="0.03 -0.03 0.05" rpy="0 ${-pi/2} ${3*pi/4}" />
+  Eigen::Affine3d camera_transform_from_link8_;
 };
 
 }  // namespace franka_example_controllers

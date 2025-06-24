@@ -2,6 +2,7 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="panda">
 
   <xacro:include filename="$(find franka_description)/robots/common/franka_robot.xacro"/>
+  <xacro:include filename="$(find franka_description)/robots/common/realsense_d435i.xacro"/>
 
   <!-- Name for this robot -->
   <xacro:arg name="arm_id" default="panda" />
@@ -32,5 +33,8 @@
                       xyz="$(arg xyz)"
                       rpy="$(arg rpy)">
   </xacro:franka_robot>
+  
+  <!-- Add RealSense D435i camera to link8 -->
+  <xacro:realsense_d435i_camera prefix="camera1" parent="$(arg arm_id)_link8"/>
 
 </robot>

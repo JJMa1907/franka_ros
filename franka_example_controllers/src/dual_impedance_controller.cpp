@@ -49,6 +49,8 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   pub_force_torque_ = node_handle.advertise<geometry_msgs::WrenchStamped>("/force_torque_ext", 1);
   
   pub_impedance_mode_status_ = node_handle.advertise<std_msgs::Bool>("/impedance_mode_status", 1);
+  
+  pub_camera_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/camera_pose", 1);
 
   // Initialize timer for periodic impedance mode status publishing (1Hz)
   impedance_mode_status_timer_ = node_handle.createTimer(
@@ -249,6 +251,22 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   
   // Initialize torque publisher
   torques_publisher_.init(node_handle, "torque_comparison", 1);
+  
+  // Initialize camera transformation from link8 to camera
+  // Based on URDF: <origin xyz="0.03 -0.03 0.05" rpy="0 ${-pi/2} ${3*pi/4}" />
+  Eigen::Vector3d camera_translation(0.05, -0.03, 0.05);
+  Eigen::Matrix3d camera_rotation;
+  double roll = M_PI/2.0;
+  double pitch = 0.0;  // -pi/2
+  double yaw = 0.0; // 3*pi/4
+  
+  // Create rotation matrix from RPY
+  camera_rotation = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+                   Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+                   Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
+  
+  camera_transform_from_link8_.translation() = camera_translation;
+  camera_transform_from_link8_.linear() = camera_rotation;
 
   return true;
 }
@@ -381,6 +399,11 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     pose_msg.pose.orientation.z = orientation.z();
     pose_msg.pose.orientation.w = orientation.w();
     pub_cartesian_pose_.publish(pose_msg);
+    
+    // Publish camera pose (need link8 transform for camera calculation)
+    std::array<double, 16> link8_array = model_handle_->getPose(franka::Frame::kFlange);
+    Eigen::Affine3d link8_transform(Eigen::Matrix4d::Map(link8_array.data()));
+    publishCameraPose(link8_transform);
 
     // Pose error computation
     Eigen::Matrix<double, 6, 1> error;
@@ -488,6 +511,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     pose_msg.pose.orientation.z = orientation.z();
     pose_msg.pose.orientation.w = orientation.w();
     pub_cartesian_pose_.publish(pose_msg);
+    
+    // Publish camera pose (use link8 transform which is same as end-effector in this case)
+    publishCameraPose(transform);
     
     // Compute joint impedance control
     for (size_t i = 0; i < 7; ++i) {
@@ -599,10 +625,27 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 
 void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) {
   if (msg->data != is_cartesian_mode_) {
+    // Get current robot state for smooth transition
+    franka::RobotState robot_state = state_handle_->getRobotState();
+    
     is_cartesian_mode_ = msg->data;
     
-    // When switching to Cartesian mode, check if stiffness is initialized
+    // Reset force/torque estimation variables for smooth transition
+    force_torque_.setZero();
+    force_torque_old_.setZero();
+    filter_step_ = 0;
+    
+    // When switching to Cartesian mode, set current pose as target
     if (is_cartesian_mode_) {
+      // Set current pose as equilibrium point to prevent motion
+      Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+      position_d_ = current_transform.translation();
+      orientation_d_ = Eigen::Quaterniond(current_transform.linear());
+      
+      // Also update nullspace target to current joint configuration
+      Eigen::Map<Eigen::Matrix<double, 7, 1>> q_current(robot_state.q.data());
+      q_d_nullspace_ = q_current;
+      
       bool is_stiffness_initialized = false;
       for (int i = 0; i < 6; ++i) {
         if (cartesian_stiffness_target_(i, i) > 0.0) {
@@ -615,6 +658,32 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
         ROS_INFO("DualImpedanceController: Switching to Cartesian mode, initializing stiffness with default values");
         initializeCartesianStiffness();
       }
+      
+      ROS_INFO("DualImpedanceController: Switched to Cartesian mode, current pose set as target");
+    } else {
+      // When switching to Joint mode, set current joint positions as target
+      for (size_t i = 0; i < 7; ++i) {
+        q_d_array_[i] = robot_state.q[i];
+        q_desired_target_[i] = robot_state.q[i];
+        // Update smoothed positions to current positions for smooth transition
+        position_smoothed_[i] = robot_state.q[i];
+        velocity_smoothed_[i] = robot_state.dq[i];
+        last_interpolated_position_[i] = robot_state.q[i];
+        last_interpolated_velocity_[i] = robot_state.dq[i];
+        initial_position_[i] = robot_state.q[i];
+        // Reset filtered velocities
+        dq_filtered_[i] = robot_state.dq[i];
+      }
+      
+      // Reset startup phase for smooth transition
+      startup_phase_ = true;
+      startup_time_ = ros::Time(0); // Reset to zero to indicate it needs initialization
+      
+      // Clear any active trajectory to prevent unexpected motion
+      clearTrajectory();
+      external_command_received_ = false;
+      
+      ROS_INFO("DualImpedanceController: Switched to Joint mode, current joint positions set as target");
     }
     
     ROS_INFO("DualImpedanceController: Switched to %s mode", 
@@ -630,20 +699,20 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
 void DualImpedanceController::initializeCartesianStiffness() {
   // Set reasonable default stiffness values (same as dynamic reconfigure defaults)
   cartesian_stiffness_target_.setIdentity();
-  cartesian_stiffness_target_(0,0) = 400.0;  // Default translational stiffness X
-  cartesian_stiffness_target_(1,1) = 400.0;  // Default translational stiffness Y  
-  cartesian_stiffness_target_(2,2) = 400.0;  // Default translational stiffness Z
-  cartesian_stiffness_target_(3,3) = 30.0;   // Default rotational stiffness X
-  cartesian_stiffness_target_(4,4) = 30.0;   // Default rotational stiffness Y
-  cartesian_stiffness_target_(5,5) = 30.0;   // Default rotational stiffness Z
+  cartesian_stiffness_target_(0,0) = 200.0;  // Default translational stiffness X
+  cartesian_stiffness_target_(1,1) = 200.0;  // Default translational stiffness Y  
+  cartesian_stiffness_target_(2,2) = 200.0;  // Default translational stiffness Z
+  cartesian_stiffness_target_(3,3) = 80.0;   // Default rotational stiffness X
+  cartesian_stiffness_target_(4,4) = 80.0;   // Default rotational stiffness Y
+  cartesian_stiffness_target_(5,5) = 80.0;   // Default rotational stiffness Z
   
   // Set corresponding damping (critical damping)
-  cartesian_damping_target_(0,0) = 2.0 * sqrt(400.0);
-  cartesian_damping_target_(1,1) = 2.0 * sqrt(400.0);
-  cartesian_damping_target_(2,2) = 2.0 * sqrt(400.0);
-  cartesian_damping_target_(3,3) = 2.0 * sqrt(30.0);
-  cartesian_damping_target_(4,4) = 2.0 * sqrt(30.0);
-  cartesian_damping_target_(5,5) = 2.0 * sqrt(30.0);
+  cartesian_damping_target_(0,0) = 2.0 * sqrt(200.0);
+  cartesian_damping_target_(1,1) = 2.0 * sqrt(200.0);
+  cartesian_damping_target_(2,2) = 2.0 * sqrt(200.0);
+  cartesian_damping_target_(3,3) = 2.0 * sqrt(80.0);
+  cartesian_damping_target_(4,4) = 2.0 * sqrt(80.0);
+  cartesian_damping_target_(5,5) = 2.0 * sqrt(80.0);
   
   // Set nullspace stiffness
   nullspace_stiffness_target_ = 0.0; // Default from dynamic reconfigure
@@ -1085,6 +1154,30 @@ void DualImpedanceController::publishImpedanceModeStatus(const ros::TimerEvent& 
   std_msgs::Bool mode_status;
   mode_status.data = is_cartesian_mode_;
   pub_impedance_mode_status_.publish(mode_status);
+}
+
+void DualImpedanceController::publishCameraPose(const Eigen::Affine3d& link8_transform) {
+  // Calculate camera pose by transforming from link8 to camera
+  Eigen::Affine3d camera_pose = link8_transform * camera_transform_from_link8_;
+  
+  // Create and publish camera pose message
+  geometry_msgs::PoseStamped camera_pose_msg;
+  camera_pose_msg.header.frame_id = "panda_link0";  // Base frame
+  camera_pose_msg.header.stamp = ros::Time::now();
+  
+  // Set position
+  camera_pose_msg.pose.position.x = camera_pose.translation()[0];
+  camera_pose_msg.pose.position.y = camera_pose.translation()[1];
+  camera_pose_msg.pose.position.z = camera_pose.translation()[2];
+  
+  // Set orientation (convert rotation matrix to quaternion)
+  Eigen::Quaterniond camera_quaternion(camera_pose.linear());
+  camera_pose_msg.pose.orientation.x = camera_quaternion.x();
+  camera_pose_msg.pose.orientation.y = camera_quaternion.y();
+  camera_pose_msg.pose.orientation.z = camera_quaternion.z();
+  camera_pose_msg.pose.orientation.w = camera_quaternion.w();
+  
+  pub_camera_pose_.publish(camera_pose_msg);
 }
 }  // namespace franka_example_controllers
 
