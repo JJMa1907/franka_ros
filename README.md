@@ -233,6 +233,92 @@ rostopic pub --once /franka_gripper/grasp/goal franka_gripper/GraspActionGoal "g
 
 ## 夹爪控制 (Gripper Control)
 
+### DualImpedanceController 集成夹爪控制
+
+`DualImpedanceController` 现在包含了集成的夹爪控制功能，可以通过 `/gripper_control` 话题接受命令并转换为原生的Franka夹爪动作。
+
+#### 话题接口
+
+##### `/gripper_control` (std_msgs/Float64MultiArray)
+
+**消息格式**: `[position, speed, force]`
+
+- **position**: 目标夹爪宽度
+  - `0.0-1.0`: 归一化位置 (0=关闭, 1=完全打开 ~8cm)  
+  - `>1.0`: 直接宽度以米为单位 (最大 ~0.08m for Franka)
+- **speed**: 运动速度 m/s (默认: 0.1 m/s)
+- **force**: 抓取力 牛顿 (可选)
+  - `< 0` 或省略: 位置模式 (简单定位)
+  - `> 0`: 抓取模式 (关闭时施加力)
+
+#### 使用示例
+
+##### 命令行控制
+```bash
+# 完全打开夹爪
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [1.0, 0.1]"
+
+# 关闭夹爪 
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [0.0, 0.05]"
+
+# 半开夹爪
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [0.5, 0.1]"
+
+# 设置特定宽度 (3cm)
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [0.03, 0.1]"
+
+# 用10N力抓取
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [0.02, 0.05, 10.0]"
+
+# 轻柔抓取用5N力
+rostopic pub /gripper_control std_msgs/Float64MultiArray "data: [0.01, 0.03, 5.0]"
+```
+
+##### Python控制示例
+```python
+import rospy
+from std_msgs.msg import Float64MultiArray
+
+rospy.init_node('gripper_control_example')
+pub = rospy.Publisher('/gripper_control', Float64MultiArray, queue_size=1)
+rospy.sleep(1)  # Wait for publisher
+
+# Open gripper
+msg = Float64MultiArray()
+msg.data = [1.0, 0.1]  # fully open, 0.1 m/s
+pub.publish(msg)
+
+# Grasp with force
+msg.data = [0.02, 0.05, 8.0]  # 2cm width, 0.05 m/s, 8N force
+pub.publish(msg)
+```
+
+#### 设置要求
+
+1. **启动时启用夹爪**:
+   ```bash
+   roslaunch franka_example_controllers dual_impedance_controller.launch load_gripper:=true robot_ip:=172.16.0.3 arm_id:="panda"
+   ```
+
+2. **验证夹爪话题可用**:
+   ```bash
+   rostopic list | grep gripper
+   ```
+   应该显示类似的话题:
+   - `/panda_gripper/move/goal`
+   - `/panda_gripper/grasp/goal`
+   - etc.
+
+#### 实现细节
+
+- 控制器自动将归一化位置 (0-1) 转换为米 (0-0.08m)
+- 自动限制宽度到有效范围
+- 基于force参数选择move或grasp动作
+- 非阻塞命令执行，便于实时控制
+- 直接发布到Franka夹爪action goal话题
+
+### 传统夹爪控制方法
+
 ### 硬件连接与初始化
 
 #### 1. 硬件重新连接步骤

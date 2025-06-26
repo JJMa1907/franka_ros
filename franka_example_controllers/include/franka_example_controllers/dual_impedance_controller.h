@@ -25,6 +25,12 @@
 #include <ros/time.h>
 #include <Eigen/Dense>
 
+// Add gripper control includes
+#include <franka_gripper/MoveActionGoal.h>
+#include <franka_gripper/GraspActionGoal.h>
+#include <franka_gripper/StopActionGoal.h>
+#include <franka_gripper/HomingActionGoal.h>
+
 #include <franka_example_controllers/compliance_paramConfig.h>
 #include <franka_hw/franka_model_interface.h>
 #include <franka_hw/franka_state_interface.h>
@@ -220,6 +226,17 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   // Camera transformation from link8 to camera base (based on URDF)
   // <origin xyz="0.03 -0.03 0.05" rpy="0 ${-pi/2} ${3*pi/4}" />
   Eigen::Affine3d camera_transform_from_link8_;
+  
+  // ============ GRIPPER CONTROL ============
+  // Gripper control subscriber and publishers
+  ros::Subscriber gripper_control_sub_;
+  ros::Publisher gripper_move_pub_;
+  ros::Publisher gripper_grasp_pub_;
+  std::string arm_id_{"panda"};
+  
+  // Gripper control callback and helper functions
+  void gripperControlCallback(const std_msgs::Float64MultiArrayConstPtr& msg);
+  bool controlGripper(double position, double speed = 0.1, double force = -1.0);
 };
 
 }  // namespace franka_example_controllers

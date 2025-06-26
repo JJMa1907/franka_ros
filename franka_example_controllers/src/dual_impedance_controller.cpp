@@ -52,6 +52,21 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   
   pub_camera_pose_ = node_handle.advertise<geometry_msgs::PoseStamped>("/camera_pose", 1);
 
+  // ============ GRIPPER CONTROL INITIALIZATION ============
+  // Gripper control subscriber
+  gripper_control_sub_ = node_handle.subscribe(
+      "/gripper_control", 1, &DualImpedanceController::gripperControlCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+
+  // Initialize gripper action goal publishers
+  std::string gripper_ns = "/franka_gripper";
+  gripper_move_pub_ = node_handle.advertise<franka_gripper::MoveActionGoal>(
+      gripper_ns + "/move/goal", 1);
+  gripper_grasp_pub_ = node_handle.advertise<franka_gripper::GraspActionGoal>(
+      gripper_ns + "/grasp/goal", 1);
+      
+  ROS_INFO_STREAM("DualImpedanceController: Gripper publishers initialized for namespace: " << gripper_ns);
+
   // Initialize timer for periodic impedance mode status publishing (1Hz)
   impedance_mode_status_timer_ = node_handle.createTimer(
       ros::Duration(1.0), &DualImpedanceController::publishImpedanceModeStatus, this);
@@ -71,6 +86,9 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
     ROS_ERROR_STREAM("DualImpedanceController: Could not read parameter arm_id");
     return false;
   }
+  
+  // Store arm_id for gripper control
+  arm_id_ = arm_id;
   
   std::vector<std::string> joint_names;
   if (!node_handle.getParam("joint_names", joint_names) || joint_names.size() != 7) {
@@ -1157,27 +1175,103 @@ void DualImpedanceController::publishImpedanceModeStatus(const ros::TimerEvent& 
 }
 
 void DualImpedanceController::publishCameraPose(const Eigen::Affine3d& link8_transform) {
-  // Calculate camera pose by transforming from link8 to camera
-  Eigen::Affine3d camera_pose = link8_transform * camera_transform_from_link8_;
+  // Calculate camera pose by applying transformation from link8 to camera
+  Eigen::Affine3d camera_transform = link8_transform * camera_transform_from_link8_;
   
-  // Create and publish camera pose message
+  // Extract position and orientation
+  Eigen::Vector3d camera_position = camera_transform.translation();
+  Eigen::Quaterniond camera_orientation(camera_transform.linear());
+  
+  // Publish camera pose
   geometry_msgs::PoseStamped camera_pose_msg;
-  camera_pose_msg.header.frame_id = "panda_link0";  // Base frame
+  camera_pose_msg.header.frame_id = "panda_link0";
   camera_pose_msg.header.stamp = ros::Time::now();
-  
-  // Set position
-  camera_pose_msg.pose.position.x = camera_pose.translation()[0];
-  camera_pose_msg.pose.position.y = camera_pose.translation()[1];
-  camera_pose_msg.pose.position.z = camera_pose.translation()[2];
-  
-  // Set orientation (convert rotation matrix to quaternion)
-  Eigen::Quaterniond camera_quaternion(camera_pose.linear());
-  camera_pose_msg.pose.orientation.x = camera_quaternion.x();
-  camera_pose_msg.pose.orientation.y = camera_quaternion.y();
-  camera_pose_msg.pose.orientation.z = camera_quaternion.z();
-  camera_pose_msg.pose.orientation.w = camera_quaternion.w();
-  
+  camera_pose_msg.pose.position.x = camera_position[0];
+  camera_pose_msg.pose.position.y = camera_position[1];
+  camera_pose_msg.pose.position.z = camera_position[2];
+  camera_pose_msg.pose.orientation.x = camera_orientation.x();
+  camera_pose_msg.pose.orientation.y = camera_orientation.y();
+  camera_pose_msg.pose.orientation.z = camera_orientation.z();
+  camera_pose_msg.pose.orientation.w = camera_orientation.w();
   pub_camera_pose_.publish(camera_pose_msg);
+}
+
+void DualImpedanceController::gripperControlCallback(const std_msgs::Float64MultiArrayConstPtr& msg) {
+  // Expected message format: [position, speed, force]
+  // position: 0-1 (normalized) or 0-0.08 (meters), speed: m/s, force: N (optional, -1 for position mode)
+  
+  if (msg->data.size() < 2) {
+    ROS_ERROR("DualImpedanceController: Gripper control message must have at least 2 elements [position, speed]. Optionally 3rd element for force.");
+    return;
+  }
+  
+  double position = msg->data[0];
+  double speed = msg->data[1];
+  double force = (msg->data.size() >= 3) ? msg->data[2] : -1.0; // Default to position mode
+  
+  // Validate parameters
+  if (speed <= 0.0) {
+    ROS_WARN("DualImpedanceController: Speed must be positive, using default 0.1 m/s");
+    speed = 0.1;
+  }
+  
+  // Call gripper control function
+  controlGripper(position, speed, force);
+}
+
+
+bool DualImpedanceController::controlGripper(double position, double speed, double force) {
+  try {
+    // Convert position to meters if normalized (0-1 range)
+    double width_meters;
+    if (position >= 0.0 && position <= 1.0) {
+      // Convert normalized position to meters (0.08m is typical max width for Franka)
+      width_meters = position * 0.08;
+    } else {
+      // Use position directly as meters
+      width_meters = position;
+    }
+    
+    // Clamp width to valid range
+    width_meters = std::max(0.0, std::min(0.08, width_meters));
+    
+    ROS_INFO("DualImpedanceController: Gripper command: width=%.4fm, speed=%.3fm/s, force=%.1fN", 
+             width_meters, speed, force);
+    
+    // Choose between move and grasp based on force parameter
+    if (force < 0.0) {
+      // Simple positioning movement
+      franka_gripper::MoveActionGoal action_goal;
+      action_goal.header.stamp = ros::Time::now();
+      action_goal.goal.width = width_meters;
+      action_goal.goal.speed = speed;
+      
+      ROS_INFO("DualImpedanceController: Publishing move command to gripper: %.4fm at %.3fm/s", 
+               width_meters, speed);
+      gripper_move_pub_.publish(action_goal);
+      
+    } else {
+      // Grasping movement with force
+      franka_gripper::GraspActionGoal action_goal;
+      action_goal.header.stamp = ros::Time::now();
+      action_goal.goal.width = width_meters;
+      action_goal.goal.speed = speed;
+      action_goal.goal.force = force;
+      // Set default epsilon values for grasp tolerance
+      action_goal.goal.epsilon.inner = 0.005;  // 5mm inner tolerance
+      action_goal.goal.epsilon.outer = 0.005;  // 5mm outer tolerance
+      
+      ROS_INFO("DualImpedanceController: Publishing grasp command to gripper: %.4fm at %.3fm/s with %.1fN force", 
+               width_meters, speed, force);
+      gripper_grasp_pub_.publish(action_goal);
+    }
+    
+    return true;
+    
+  } catch (const std::exception& e) {
+    ROS_ERROR("DualImpedanceController: Error controlling gripper: %s", e.what());
+    return false;
+  }
 }
 }  // namespace franka_example_controllers
 
