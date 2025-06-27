@@ -439,6 +439,10 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     Eigen::AngleAxisd error_quaternion_angle_axis(error_quaternion);
     error.tail(3) << error_quaternion_angle_axis.axis() * error_quaternion_angle_axis.angle();
 
+    // Display error between current state and target in Cartesian mode
+    ROS_INFO_THROTTLE(1.0, "Cartesian Mode Error - Position: [%.4f, %.4f, %.4f] m, Orientation: [%.4f, %.4f, %.4f] rad",
+                     error[0], error[1], error[2], error[3], error[4], error[5]);
+
     Eigen::VectorXd tau_task(7), tau_nullspace(7), null_vect(7), tau_joint_limit(7);
     
     Eigen::MatrixXd Null_mat = Eigen::MatrixXd::Identity(7, 7) - jacobian.transpose() * jacobian_transpose_pinv;
@@ -492,7 +496,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       
       double time_elapsed = (time - startup_time_).toSec();
       double normalized_time = time_elapsed / startup_duration_;
-      // startup_factor = std::min(normalized_time * normalized_time, 1.0);
+      startup_factor = std::min(normalized_time * normalized_time, 1.0);
       
       if (time_elapsed > startup_duration_) {
         startup_phase_ = false;
@@ -546,7 +550,8 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       //          position_smoothed_[4], position_smoothed_[5], position_smoothed_[6]);
     }
     debug_counter++;
-    
+    //pos_error 
+    std::array<double, 7> pos_error;
     for (size_t i = 0; i < 7; ++i) {
       double q_target = 0.0;
       double dq_target = 0.0;
@@ -590,7 +595,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       }
       
       // Calculate position error (deoxys-compatible)
+
       double position_error = q_target - current_q;
+      pos_error[i] = position_error;
 
       // PD control calculation with reduced gains during startup
       double effective_k = startup_phase_ ? k_gains_[i] * startup_factor : k_gains_[i];
@@ -617,6 +624,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
     }
 
+    ROS_INFO_THROTTLE(1.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                     pos_error[0], pos_error[1], pos_error[2], pos_error[3],
+                     pos_error[4], pos_error[5], pos_error[6]);
     std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
 
     for (size_t i = 0; i < 7; ++i) {
