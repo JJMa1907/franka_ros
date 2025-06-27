@@ -492,7 +492,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       
       double time_elapsed = (time - startup_time_).toSec();
       double normalized_time = time_elapsed / startup_duration_;
-      startup_factor = std::min(normalized_time * normalized_time, 1.0);
+      // startup_factor = std::min(normalized_time * normalized_time, 1.0);
       
       if (time_elapsed > startup_duration_) {
         startup_phase_ = false;
@@ -534,6 +534,19 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     publishCameraPose(transform);
     
     // Compute joint impedance control
+    
+    // 添加joint模式调试输出（每100个周期输出一次，避免日志过多）
+    static int debug_counter = 0;
+    if (debug_counter % 100 == 0) {
+      //rostopic pub /joint_command   std_msgs/Float64MultiArray "data:  [0.092, -0.198, -0.02, -2.473, -0.013, 2.304, 0.848]"
+      ROS_INFO("=== Joint Mode Update (cycle %d) ===", debug_counter);
+      ROS_INFO("isTrajectoryActive(): %s", isTrajectoryActive() ? "true" : "false");
+      // ROS_INFO("Current joint positions: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+      //          position_smoothed_[0], position_smoothed_[1], position_smoothed_[2], position_smoothed_[3],
+      //          position_smoothed_[4], position_smoothed_[5], position_smoothed_[6]);
+    }
+    debug_counter++;
+    
     for (size_t i = 0; i < 7; ++i) {
       double q_target = 0.0;
       double dq_target = 0.0;
@@ -578,7 +591,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       
       // Calculate position error (deoxys-compatible)
       double position_error = q_target - current_q;
-      
+
       // PD control calculation with reduced gains during startup
       double effective_k = startup_phase_ ? k_gains_[i] * startup_factor : k_gains_[i];
       double effective_d = startup_phase_ ? d_gains_[i] * startup_factor : d_gains_[i];
@@ -608,9 +621,13 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 
     for (size_t i = 0; i < 7; ++i) {
       tau_d[i] = tau_d_saturated[i];
-    }
+    }    
   }
 
+  {
+      ROS_INFO("Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+               tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
+  }
   // Set joint commands
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d[i]);
@@ -699,7 +716,7 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
       
       // Clear any active trajectory to prevent unexpected motion
       clearTrajectory();
-      external_command_received_ = false;
+      external_command_received_ = true;
       
       ROS_INFO("DualImpedanceController: Switched to Joint mode, current joint positions set as target");
     }
