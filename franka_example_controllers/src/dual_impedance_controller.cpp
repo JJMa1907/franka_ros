@@ -99,7 +99,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   // Joint impedance parameters
   std::vector<double> joint_kp = {300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0};
   std::vector<double> joint_kd = {20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0};
-  std::vector<double> max_delta_q = {0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06};
+  std::vector<double> max_delta_q = {0.04, 0.04, 0.04, 0.04, 0.06, 0.06, 0.06};
   
   node_handle.getParam("joint_kp", joint_kp);
   node_handle.getParam("joint_kd", joint_kd);
@@ -114,8 +114,8 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   }
 
   // State estimation parameters (exponential smoothing)
-  alpha_q_ = 0.9;
-  alpha_dq_ = 0.9;
+  alpha_q_ = 0.95; // 提高状态估计更新率以减少滞后
+  alpha_dq_ = 0.95;
   node_handle.getParam("alpha_q", alpha_q_);
   node_handle.getParam("alpha_dq", alpha_dq_);
 
@@ -167,13 +167,13 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   }
 
   if (!node_handle.getParam("power_limit", power_limit_)) {
-    power_limit_ = 37.0;
+    power_limit_ = 25.0; // 降低功率限制以提高安全性
   }
-  power_limit_startup_ = power_limit_ * 0.7;
+  power_limit_startup_ = power_limit_ * 0.6; // 启动时更加保守
   node_handle.getParam("power_limit_startup", power_limit_startup_);
   
   if (!node_handle.getParam("tau_limit", tau_limit_)) {
-    tau_limit_ = 87.0;
+    tau_limit_ = 60.0; // 降低力矩限制以减少force threshold错误
   }
   
   if (!node_handle.getParam("startup_duration", startup_duration_)) {
@@ -504,7 +504,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       velocity_smoothed_[i] = alpha_dq_ * robot_state.dq[i] + (1.0 - alpha_dq_) * velocity_smoothed_[i];
     }
     
-    double alpha = 0.99;
+    double alpha = 0.90; // 降低滤波系数，提高响应性
     for (size_t i = 0; i < 7; i++) {
       dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];
     }
@@ -611,9 +611,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
     }
 
-    ROS_INFO_THROTTLE(5.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
-                     pos_error[0], pos_error[1], pos_error[2], pos_error[3],
-                     pos_error[4], pos_error[5], pos_error[6]);
+    // ROS_INFO_THROTTLE(5.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+    //                  pos_error[0], pos_error[1], pos_error[2], pos_error[3],
+    //                  pos_error[4], pos_error[5], pos_error[6]);
     std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
 
     for (size_t i = 0; i < 7; ++i) {
@@ -769,7 +769,7 @@ std::array<double, 7> DualImpedanceController::saturateTorqueRateJoint(
   double delta_tau_max = kDeltaTauMax;
   
   if (startup_phase_ || first_command_) {
-    delta_tau_max = kDeltaTauMax * 0.4;
+    delta_tau_max = kDeltaTauMax * 0.3; // 启动时更加保守，降低到30%
     first_command_ = false;
   }
   
@@ -790,8 +790,8 @@ std::array<double, 7> DualImpedanceController::saturateTorqueRateJoint(
   
   if (total_power > effective_power_limit && total_power > 0) {
     power_scaling = effective_power_limit / total_power;
-    // Ensure we never scale up, only down
-    power_scaling = std::min(power_scaling, 1.0);
+    // 确保功率缩放更加保守
+    power_scaling = std::min(power_scaling, 0.95); // 最多使用95%的功率
   }
   
   // Apply power scaling to the rate-limited torques
@@ -873,14 +873,14 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
     
     // Apply a velocity damping factor as we approach the target
     // This creates a smoother deceleration profile
-    const double approach_threshold = 0.1; // radians
+    const double approach_threshold = 0.15; // 增大接近阈值，减少过早减速
     double damping_factor = 1.0;
     
     if (error_abs < approach_threshold) {
       // Gradually reduce velocity as we get closer to the target
       // This prevents overshoot and oscillation
       damping_factor = error_abs / approach_threshold;
-      damping_factor = std::max(0.2, damping_factor); // Don't slow down too much
+      damping_factor = std::max(0.7, damping_factor); // 提高最小速度系数，减少低速阶段的卡顿
     }
     
     double delta_position = std::max(std::min(position_error, max_delta * damping_factor), 
@@ -891,9 +891,10 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
     target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
     
     // Apply velocity smoothing with lower limit near target
-    double vel_limit = 0.5;
+    double vel_limit = 1.0; // 提高速度上限
     if (error_abs < approach_threshold) {
-      vel_limit = 0.5 * damping_factor;
+      double normalized_error = error_abs / approach_threshold;
+vel_limit = 0.3 + 0.7 * normalized_error * normalized_error;
     }
     
     target_velocity[i] = std::max(std::min(target_velocity[i], vel_limit), -vel_limit);
@@ -901,8 +902,8 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
   
   // Check if we've reached the target point (within tolerance)
   bool reached_target = true;
-  const double position_tolerance = 0.01; // 0.01 radians (about 0.57 degrees)
-  const double velocity_tolerance = 0.05; // 0.05 rad/s - ensure we're also slowing down
+  const double position_tolerance = 0.015; // 提高位置容差，减少过度精确导致的慢速卡顿
+  const double velocity_tolerance = 0.08; // 提高速度容差，允许更早开始下一点
   
   double max_pos_error = 0.0;
   double max_vel = 0.0;
@@ -945,8 +946,8 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
   } else {
     // If we're on the last point and been trying for a while, consider forcing completion
     if (current_trajectory_index_ == (trajectory_buffer_.size() - 1)) {
-      const int max_attempts = 300; // Reduced from 500ms to 300ms of attempts
-      const int hold_period = 100;  // Hold completed position for 100ms
+      const int max_attempts = 2; // 减少到200ms，更快完成轨迹
+      const int hold_period = 5;   // 减少稳定保持时间，提高响应性
       
       if (trajectory_completion_countdown_ > max_attempts + hold_period) {
         current_trajectory_index_++;
@@ -975,7 +976,7 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
     
     // Only deactivate after a short "settling period"
     static int deactivation_count = 0;
-    const int settle_cycles = 5; // 50ms settling time
+    const int settle_cycles = 3; // 减少到30ms settling time，提高响应性
     
     if (deactivation_count > settle_cycles) {
       trajectory_active_ = false;
