@@ -177,10 +177,10 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   }
   
   if (!node_handle.getParam("startup_duration", startup_duration_)) {
-    startup_duration_ = 2.0;
+    startup_duration_ = 0.5;
   }
 
-  double publish_rate(30.0);
+  double publish_rate(500.0);  // Increase publishing rate to maximum
   node_handle.getParam("publish_rate", publish_rate);
   rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
@@ -391,21 +391,16 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     
     force_torque_ = force_torque_ - jacobian_transpose_pinv * (tau_ext - tau_f);
 
-    // Publish filtered force/torque
-    filter_step_++;
-    if (filter_step_ == filter_step_max_) {
-      geometry_msgs::WrenchStamped force_torque_msg;
-      force_torque_msg.wrench.force.x = force_torque_old_[0] * (1 - alpha_force_) + force_torque_[0] * alpha_force_ / filter_step_max_;
-      force_torque_msg.wrench.force.y = force_torque_old_[1] * (1 - alpha_force_) + force_torque_[1] * alpha_force_ / filter_step_max_;
-      force_torque_msg.wrench.force.z = force_torque_old_[2] * (1 - alpha_force_) + force_torque_[2] * alpha_force_ / filter_step_max_;
-      force_torque_msg.wrench.torque.x = force_torque_old_[3] * (1 - alpha_force_) + force_torque_[3] * alpha_force_ / filter_step_max_;
-      force_torque_msg.wrench.torque.y = force_torque_old_[4] * (1 - alpha_force_) + force_torque_[4] * alpha_force_ / filter_step_max_;
-      force_torque_msg.wrench.torque.z = force_torque_old_[5] * (1 - alpha_force_) + force_torque_[5] * alpha_force_ / filter_step_max_;
-      pub_force_torque_.publish(force_torque_msg);
-      force_torque_old_ = force_torque_ / filter_step_max_;
-      force_torque_.setZero();
-      filter_step_ = 0;
-    }
+    // Publish force/torque directly without filtering to reduce delay
+    geometry_msgs::WrenchStamped force_torque_msg;
+    force_torque_msg.wrench.force.x = force_torque_[0]; 
+    force_torque_msg.wrench.force.y = force_torque_[1];
+    force_torque_msg.wrench.force.z = force_torque_[2];
+    force_torque_msg.wrench.torque.x = force_torque_[3];
+    force_torque_msg.wrench.torque.y = force_torque_[4];
+    force_torque_msg.wrench.torque.z = force_torque_[5];
+    pub_force_torque_.publish(force_torque_msg);
+    force_torque_.setZero();
 
     // Publish current cartesian pose
     geometry_msgs::PoseStamped pose_msg;
@@ -440,7 +435,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     error.tail(3) << error_quaternion_angle_axis.axis() * error_quaternion_angle_axis.angle();
 
     // Display error between current state and target in Cartesian mode
-    ROS_INFO_THROTTLE(1.0, "Cartesian Mode Error - Position: [%.4f, %.4f, %.4f] m, Orientation: [%.4f, %.4f, %.4f] rad",
+    ROS_INFO_THROTTLE(5.0, "Cartesian Mode Error - Position: [%.4f, %.4f, %.4f] m, Orientation: [%.4f, %.4f, %.4f] rad",
                      error[0], error[1], error[2], error[3], error[4], error[5]);
 
     Eigen::VectorXd tau_task(7), tau_nullspace(7), null_vect(7), tau_joint_limit(7);
@@ -539,18 +534,10 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     
     // Compute joint impedance control
     
-    // 添加joint模式调试输出（每100个周期输出一次，避免日志过多）
-    static int debug_counter = 0;
-    if (debug_counter % 100 == 0) {
-      //rostopic pub /joint_command   std_msgs/Float64MultiArray "data:  [0.092, -0.198, -0.02, -2.473, -0.013, 2.304, 0.848]"
-      ROS_INFO("=== Joint Mode Update (cycle %d) ===", debug_counter);
-      ROS_INFO("isTrajectoryActive(): %s", isTrajectoryActive() ? "true" : "false");
-      // ROS_INFO("Current joint positions: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-      //          position_smoothed_[0], position_smoothed_[1], position_smoothed_[2], position_smoothed_[3],
-      //          position_smoothed_[4], position_smoothed_[5], position_smoothed_[6]);
-    }
-    debug_counter++;
-    //pos_error 
+    // Debug output for joint mode without rate limiting
+    // ROS_INFO("=== Joint Mode Update ===");
+    // ROS_INFO("isTrajectoryActive(): %s", isTrajectoryActive() ? "true" : "false");
+    // //pos_error 
     std::array<double, 7> pos_error;
     for (size_t i = 0; i < 7; ++i) {
       double q_target = 0.0;
@@ -624,7 +611,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
     }
 
-    ROS_INFO_THROTTLE(1.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+    ROS_INFO_THROTTLE(5.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
                      pos_error[0], pos_error[1], pos_error[2], pos_error[3],
                      pos_error[4], pos_error[5], pos_error[6]);
     std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
@@ -634,17 +621,17 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     }    
   }
 
-  {
-      ROS_INFO("Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-               tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
-  }
+  // {
+  //     ROS_INFO("Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+  //              tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
+  // }
   // Set joint commands
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d[i]);
   }
 
-  // Publish torque data
-  if (rate_trigger_() && torques_publisher_.trylock()) {
+  // Publish torque data - always publish without rate limiting
+  if (torques_publisher_.trylock()) {
     std::array<double, 7> tau_j = robot_state.tau_J;
     std::array<double, 7> tau_error;
     double error_rms(0.0);
@@ -988,7 +975,7 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
     
     // Only deactivate after a short "settling period"
     static int deactivation_count = 0;
-    const int settle_cycles = 50; // 50ms settling time
+    const int settle_cycles = 5; // 50ms settling time
     
     if (deactivation_count > settle_cycles) {
       trajectory_active_ = false;
@@ -1262,7 +1249,7 @@ bool DualImpedanceController::controlGripper(double position, double speed, doub
     // Clamp width to valid range
     width_meters = std::max(0.0, std::min(0.08, width_meters));
     
-    ROS_INFO("DualImpedanceController: Gripper command: width=%.4fm, speed=%.3fm/s, force=%.1fN", 
+    ROS_INFO_THROTTLE(5.0, "DualImpedanceController: Gripper command: width=%.4fm, speed=%.3fm/s, force=%.1fN", 
              width_meters, speed, force);
     
     // Choose between move and grasp based on force parameter
@@ -1273,8 +1260,6 @@ bool DualImpedanceController::controlGripper(double position, double speed, doub
       action_goal.goal.width = width_meters;
       action_goal.goal.speed = speed;
       
-      ROS_INFO("DualImpedanceController: Publishing move command to gripper: %.4fm at %.3fm/s", 
-               width_meters, speed);
       gripper_move_pub_.publish(action_goal);
       
     } else {
