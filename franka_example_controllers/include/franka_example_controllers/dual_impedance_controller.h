@@ -141,8 +141,8 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   std::array<double, 7> velocity_smoothed_;
   
   // Trajectory interpolation parameters
-  double time_fraction_{1.0};
-  
+  // double time_fraction_{1.0};
+  std::array<double, 7> velocity_filtered_;
   // Control parameters for joint impedance
   bool use_external_command_{false};
   bool is_delta_{false};
@@ -150,8 +150,6 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   double coriolis_factor_{1.0};
   double joint_limit_margin_{0.1}; // Distance threshold for joint limit protection
   // Power and torque limits
-  double power_limit_{50.0}; // Maximum power limit in Watts
-  double power_limit_startup_{35.0}; // Reduced power limit during startu
   double tau_limit_{87.0};
   
   // Startup protection
@@ -160,6 +158,13 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   double startup_duration_{1.0}; // Increased time for smoother startup
   ros::Time startup_time_;
   
+                // 0.09162008114028396,
+                // -0.19826458111314524,
+                // -0.01990020486871322,
+                // -2.4732269941140346,
+                // -0.01307073642274261,
+                // 2.30396583422025,
+                // 0.8480939705504309,
   // Trajectory interpolation structures
   struct TrajectoryPoint {
     std::array<double, 7> position;
@@ -168,7 +173,6 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   };
   
   // Trajectory interpolation variables
-  std::vector<TrajectoryPoint> trajectory_buffer_;
   bool trajectory_active_{false};
   size_t current_trajectory_index_{0};
   double trajectory_start_time_{0.0};
@@ -182,21 +186,12 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
       torques_publisher_;
   franka_hw::TriggerRate rate_trigger_{1.0};
   // Joint impedance trajectory functions
-  void addTrajectoryPoint(const std::array<double, 7>& position, 
-                         const std::array<double, 7>& velocity);
   std::array<double, 7> interpolateTrajectory(double current_time, 
                                              std::array<double, 7>& target_velocity);
-  void clearTrajectory();
-  bool isTrajectoryActive() const;
   
   // Joint subscriber
   ros::Subscriber joint_command_sub_;
   void jointCommandCallback(const std_msgs::Float64MultiArrayConstPtr& msg);
-  
-  // Enhanced saturation for joint impedance mode
-  std::array<double, 7> saturateTorqueRateJoint(
-      const std::array<double, 7>& tau_d_calculated,
-      const std::array<double, 7>& tau_J_d);
   
   // Common parameters
   const double delta_tau_max_{1.0};

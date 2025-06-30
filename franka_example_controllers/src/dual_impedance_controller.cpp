@@ -65,7 +65,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   gripper_grasp_pub_ = node_handle.advertise<franka_gripper::GraspActionGoal>(
       gripper_ns + "/grasp/goal", 1);
       
-  ROS_INFO_STREAM("DualImpedanceController: Gripper publishers initialized for namespace: " << gripper_ns);
+  // ROS_INFO_STREAM("DualImpedanceController: Gripper publishers initialized for namespace: " << gripper_ns);
 
   // Initialize timer for periodic impedance mode status publishing (1Hz)
   impedance_mode_status_timer_ = node_handle.createTimer(
@@ -96,15 +96,25 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
     return false;
   }
 
-  // Joint impedance parameters
-  std::vector<double> joint_kp = {300.0, 300.0, 300.0, 300.0, 225.0, 450.0, 150.0};
-  std::vector<double> joint_kd = {20.0, 20.0, 20.0, 20.0, 7.5, 15.0, 5.0};
-  std::vector<double> max_delta_q = {0.04, 0.04, 0.04, 0.04, 0.06, 0.06, 0.06};
+  // Joint impedance parameters - 降低增益以避免force threshold错误
+  std::vector<double> joint_kp = {150.0, 150.0, 150.0, 150.0, 100.0, 200.0, 80.0};  // 显著降低P增益
+  std::vector<double> joint_kd = {15.0, 15.0, 15.0, 15.0, 8.0, 12.0, 6.0};          // 适度降低D增益
   
+  // Trajectory interpolation parameters
+  // time_fraction_ = 0.2; // up, speed up, waypoints down 
+  // node_handle.getParam("time_fraction", time_fraction_);
+  std::vector<double> max_delta_q = {0.05, 0.05, 0.05, 0.05, 0.06, 0.06, 0.06};
+  
+  // std::vector<double> max_delta_q = {0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03}; //rad per cycle default
+  // std::vector<double> max_delta_q = {0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02}; //rad per cycle
+  // std::vector<double> max_delta_q = {0.005, 0.005, 0.005, 0.005, 0.006, 0.006, 0.006};
   node_handle.getParam("joint_kp", joint_kp);
   node_handle.getParam("joint_kd", joint_kd);
   node_handle.getParam("max_delta_q", max_delta_q);
-
+  // output max_delta_q for debugging
+  for (size_t i = 0; i < max_delta_q.size(); ++i) {
+    ROS_INFO("DualImpedanceController: Max delta position for joint %zu: %.4f rad", i, max_delta_q[i]);
+  }
   // Use joint_kp and joint_kd as k_gains and d_gains
   k_gains_.resize(7);
   d_gains_.resize(7);
@@ -119,9 +129,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.getParam("alpha_q", alpha_q_);
   node_handle.getParam("alpha_dq", alpha_dq_);
 
-  // Trajectory interpolation parameters
-  time_fraction_ = 1.0;
-  node_handle.getParam("time_fraction", time_fraction_);
+  
   
   // Controller startup parameters
   node_handle.getParam("startup_duration", startup_duration_);
@@ -165,15 +173,9 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   if (!node_handle.getParam("joint_limit_margin", joint_limit_margin_)) {
     joint_limit_margin_ = 0.1;
   }
-
-  if (!node_handle.getParam("power_limit", power_limit_)) {
-    power_limit_ = 25.0; // 降低功率限制以提高安全性
-  }
-  power_limit_startup_ = power_limit_ * 0.6; // 启动时更加保守
-  node_handle.getParam("power_limit_startup", power_limit_startup_);
   
   if (!node_handle.getParam("tau_limit", tau_limit_)) {
-    tau_limit_ = 60.0; // 降低力矩限制以减少force threshold错误
+    tau_limit_ = 30.0; // 进一步降低力矩限制以避免force threshold错误
   }
   
   if (!node_handle.getParam("startup_duration", startup_duration_)) {
@@ -253,10 +255,10 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   trajectory_active_ = false;
   current_trajectory_index_ = 0;
   trajectory_start_time_ = 0.0;
-  trajectory_buffer_.clear();
   
   // Initialize max delta position per control cycle (from deoxys max_delta_q config)
   for (size_t i = 0; i < 7; ++i) {
+    ROS_INFO("DualImpedanceController: Max delta position for joint %zu: %.4f rad", i, max_delta_q[i]);
     max_delta_position_per_cycle_[i] = max_delta_q[i]; // 0.06 rad per cycle default
     last_interpolated_position_[i] = 0.0;
     last_interpolated_velocity_[i] = 0.0;
@@ -266,6 +268,7 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   trajectory_completion_countdown_ = 0;
 
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
+  std::fill(velocity_filtered_.begin(), velocity_filtered_.end(), 0);
   
   // Initialize torque publisher
   torques_publisher_.init(node_handle, "torque_comparison", 1);
@@ -323,7 +326,6 @@ void DualImpedanceController::starting(const ros::Time& time) {
   trajectory_active_ = false;
   current_trajectory_index_ = 0;
   trajectory_completion_countdown_ = 0;
-  clearTrajectory();
   
   // Reset startup phase for smooth transition
   startup_phase_ = true;
@@ -535,9 +537,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     // Compute joint impedance control
     
     // Debug output for joint mode without rate limiting
-    // ROS_INFO("=== Joint Mode Update ===");
-    // ROS_INFO("isTrajectoryActive(): %s", isTrajectoryActive() ? "true" : "false");
-    // //pos_error 
+    //pos_error 
     std::array<double, 7> pos_error;
     for (size_t i = 0; i < 7; ++i) {
       double q_target = 0.0;
@@ -549,7 +549,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       
       if (use_external_command_ && external_command_received_) {
         // Use trajectory interpolation for external commands (deoxys-compatible)
-        if (isTrajectoryActive()) {
+        // if (isTrajectoryActive()) {
           // Only call interpolateTrajectory once per update cycle and store the results
           static std::array<double, 7> interpolated_position_cache;
           static std::array<double, 7> target_velocity_cache;
@@ -563,22 +563,27 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
           // Use the cached values
           q_target = interpolated_position_cache[i];
           dq_target = target_velocity_cache[i];
-        } else {
-          // No active trajectory, use the desired target position
-          q_target = q_desired_target_[i];
-          dq_target = 0.0;
-        }
+          ROS_INFO_THROTTLE(1.0, "Interpolated joint %zu: q_target = %.3f, dq_target = %.3f", i, q_target, dq_target);
+        // } 
+        // else {
+        //   // No active trajectory, use the desired target position
+        //   q_target = q_desired_target_[i];
+        //   dq_target = 0.0;
+        //   ROS_INFO_THROTTLE(1.0, "Using external command for joint %zu: q_target = %.3f", i, q_target);
+        // }
       }
       else if (use_external_command_ && !external_command_received_) {
         // When external command mode is enabled but no command received yet,
         // maintain current position
         q_target = current_q;
         dq_target = 0.0;
+        ROS_INFO_THROTTLE(1.0, "No external command received for joint %zu, maintaining position: q_target = %.3f", i, q_target);
       }
       else {
         // Use simple joint targets
         q_target = q_d_array_[i];
         dq_target = 0.0;
+        ROS_INFO_THROTTLE(1.0, "Using joint target for joint %zu: q_target = %.3f", i, q_target);
       }
       
       // Calculate position error (deoxys-compatible)
@@ -610,11 +615,14 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       
       tau_d_calculated[i] += coriolis_factor_ * coriolis[i];
     }
-
-    // ROS_INFO_THROTTLE(5.0, "Joint Mode Position Error: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
-    //                  pos_error[0], pos_error[1], pos_error[2], pos_error[3],
-    //                  pos_error[4], pos_error[5], pos_error[6]);
-    std::array<double, 7> tau_d_saturated = saturateTorqueRateJoint(tau_d_calculated, robot_state.tau_J_d);
+    
+    // Convert std::array to Eigen::Matrix for saturateTorqueRate
+    Eigen::Matrix<double, 7, 1> tau_d_eigen;
+    for (size_t i = 0; i < 7; ++i) {
+      tau_d_eigen[i] = tau_d_calculated[i];
+    }
+    
+    Eigen::Matrix<double, 7, 1> tau_d_saturated = saturateTorqueRate(tau_d_eigen, tau_J_d);
 
     for (size_t i = 0; i < 7; ++i) {
       tau_d[i] = tau_d_saturated[i];
@@ -711,8 +719,6 @@ void DualImpedanceController::modeCallback(const std_msgs::Bool::ConstPtr& msg) 
       startup_phase_ = true;
       startup_time_ = ros::Time(0); // Reset to zero to indicate it needs initialization
       
-      // Clear any active trajectory to prevent unexpected motion
-      clearTrajectory();
       external_command_received_ = true;
       
       ROS_INFO("DualImpedanceController: Switched to Joint mode, current joint positions set as target");
@@ -761,250 +767,122 @@ Eigen::Matrix<double, 7, 1> DualImpedanceController::saturateTorqueRate(
   return tau_d_saturated;
 }
 
-std::array<double, 7> DualImpedanceController::saturateTorqueRateJoint(
-    const std::array<double, 7>& tau_d_calculated,
-    const std::array<double, 7>& tau_J_d) {
-  std::array<double, 7> tau_d_saturated{};
-  
-  double delta_tau_max = kDeltaTauMax;
-  
-  if (startup_phase_ || first_command_) {
-    delta_tau_max = kDeltaTauMax * 0.3; // 启动时更加保守，降低到30%
-    first_command_ = false;
-  }
-  
-  double total_power = 0.0;
-  std::array<double, 7> rate_limited_tau;
-  
-  for (size_t i = 0; i < 7; i++) {
-    double difference = tau_d_calculated[i] - tau_J_d[i];
-    rate_limited_tau[i] = tau_J_d[i] + std::max(std::min(difference, delta_tau_max), -delta_tau_max);
-    total_power += std::abs(rate_limited_tau[i] * dq_filtered_[i]);
-  }
-  
-  // Apply additional scaling if power limit would be exceeded
-  double power_scaling = 1.0;
-  
-  // Use more conservative power limit during startup phase
-  double effective_power_limit = startup_phase_ ? power_limit_startup_ : power_limit_;
-  
-  if (total_power > effective_power_limit && total_power > 0) {
-    power_scaling = effective_power_limit / total_power;
-    // 确保功率缩放更加保守
-    power_scaling = std::min(power_scaling, 0.95); // 最多使用95%的功率
-  }
-  
-  // Apply power scaling to the rate-limited torques
-  for (size_t i = 0; i < 7; i++) {
-    // Apply power scaling to rate_limited torque
-    tau_d_saturated[i] = rate_limited_tau[i] * power_scaling;
-    // Finally apply absolute limit
-    tau_d_saturated[i] = std::max(std::min(tau_d_saturated[i], tau_limit_), -tau_limit_);
-  }
-  
-  return tau_d_saturated;
-}
-
-// Trajectory interpolation methods (deoxys-compatible implementation)
-void DualImpedanceController::addTrajectoryPoint(
-    const std::array<double, 7>& position, 
-    const std::array<double, 7>& velocity) {
-  
-  TrajectoryPoint point;
-  point.position = position;
-  point.velocity = velocity;
-  point.timestamp = ros::Time::now().toSec();
-  
-  trajectory_buffer_.push_back(point);
-  
-  // Start trajectory if this is the first point
-  if (!trajectory_active_) {
-    trajectory_active_ = true;
-    trajectory_start_time_ = point.timestamp;
-    current_trajectory_index_ = 0;
-    
-    // Initialize interpolated position to current smoothed robot position, not target position
-    // This ensures trajectory interpolation starts from current position and gradually moves to target
-    // We use position_smoothed_ which is the current filtered robot position
-    for (size_t i = 0; i < 7; ++i) {
-      last_interpolated_position_[i] = position_smoothed_[i];
-      last_interpolated_velocity_[i] = velocity_smoothed_[i];
-    }
-  }
-  
-  // Limit buffer size to prevent memory issues
-  const size_t max_buffer_size = 100;
-  if (trajectory_buffer_.size() > max_buffer_size) {
-    trajectory_buffer_.erase(trajectory_buffer_.begin());
-  }
-}
-
 std::array<double, 7> DualImpedanceController::interpolateTrajectory(
     double current_time, 
     std::array<double, 7>& target_velocity) {
+
+  // Output q_desired_target_ for debugging
+  // ROS_INFO_THROTTLE(1.0, "q_desired_target_: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+  //          q_desired_target_[0], q_desired_target_[1], q_desired_target_[2],
+  //          q_desired_target_[3], q_desired_target_[4], q_desired_target_[5],
+  //          q_desired_target_[6]);
   
-  std::array<double, 7> interpolated_position = last_interpolated_position_;
-  target_velocity = last_interpolated_velocity_;
+  std::array<double, 7> interpolated_position;
+  franka::RobotState robot_state = state_handle_->getRobotState();
+  Eigen::Map<Eigen::Matrix<double, 7, 1>> q_current(robot_state.q.data());
   
-  if (!trajectory_active_ || trajectory_buffer_.empty()) {
-    return interpolated_position;
-  }
+  // Simple interpolation: based on max step limits and position error
+  bool target_reached = true;
+  double max_position_error = 0.0;
+    
+  // 控制参数
+  const double control_frequency = 1000.0; // 1kHz
+  const double position_tolerance = 0.002; // 减小到2毫弧度
+  const double velocity_tolerance = 0.005; // 速度容差
   
-  // Apply time_fraction scaling (deoxys-compatible)
-  double scaled_time = (current_time - trajectory_start_time_) * time_fraction_;
-  double target_time = trajectory_start_time_ + scaled_time;
-  
-  // Find the current target point
-  if (current_trajectory_index_ >= trajectory_buffer_.size()) {
-    // We've already reached the end of the trajectory
-    trajectory_active_ = false;
-    return interpolated_position;
-  }
-  
-  const TrajectoryPoint& target_point = trajectory_buffer_[current_trajectory_index_];
-  
-  // LINEAR_JOINT_POSITION interpolation implementation with improved velocity profile
   for (size_t i = 0; i < 7; ++i) {
-    double position_error = target_point.position[i] - last_interpolated_position_[i];
+    double position_error = q_desired_target_[i] - last_interpolated_position_[i];
+    double max_step = max_delta_position_per_cycle_[i];
+    
+    // 计算到目标的绝对误差
     double error_abs = std::abs(position_error);
     
-    // Apply max_delta_q constraint (from deoxys config)
-    double max_delta = max_delta_position_per_cycle_[i];
+    // 超保守的平滑插值 - 避免force threshold错误
+    double delta_position = 0.0;
     
-    // Apply a velocity damping factor as we approach the target
-    // This creates a smoother deceleration profile
-    const double approach_threshold = 0.15; // 增大接近阈值，减少过早减速
-    double damping_factor = 1.0;
-    
-    if (error_abs < approach_threshold) {
-      // Gradually reduce velocity as we get closer to the target
-      // This prevents overshoot and oscillation
-      damping_factor = error_abs / approach_threshold;
-      damping_factor = std::max(0.7, damping_factor); // 提高最小速度系数，减少低速阶段的卡顿
+    if (error_abs < position_tolerance) {
+      // 非常接近目标时，完全停止
+      delta_position = 0.0;
+      target_velocity[i] = 0.0;
+    }
+    else if (error_abs < 0.01) {
+      // 在10毫弧度内，使用很小的步长（10%最大步长）
+      double small_step = std::min(max_step * 0.1, error_abs * 0.3);
+      delta_position = (position_error > 0) ? small_step : -small_step;
+    }
+    else if (error_abs < 0.05) {
+      // 在50毫弧度内，渐进式减速（10%-50%最大步长）
+      double scale_factor = 0.1 + 0.4 * (error_abs - 0.01) / (0.05 - 0.01);
+      double scaled_step = max_step * scale_factor;
+      delta_position = std::max(std::min(position_error, scaled_step), -scaled_step);
+    }
+    else {
+      // 远距离时，使用限制步长（最大50%标准步长）
+      double conservative_step = max_step * 0.5;
+      delta_position = std::max(std::min(position_error, conservative_step), -conservative_step);
     }
     
-    double delta_position = std::max(std::min(position_error, max_delta * damping_factor), 
-                                    -max_delta * damping_factor);
+    // 额外的速度变化率限制 - 防止突然的速度变化
+    double previous_velocity = last_interpolated_velocity_[i];
+    double proposed_velocity = delta_position * control_frequency;
     
-    // Linear interpolation with velocity constraint
+    // 限制加速度：最大速度变化率 = 5 rad/s²
+    double max_accel = 5.0; // rad/s²
+    double max_velocity_change = max_accel / control_frequency; // per cycle
+    
+    if (std::abs(proposed_velocity - previous_velocity) > max_velocity_change) {
+      // 限制速度变化，重新计算位置变化
+      double limited_velocity = previous_velocity + 
+        std::max(std::min(proposed_velocity - previous_velocity, max_velocity_change), -max_velocity_change);
+      delta_position = limited_velocity / control_frequency;
+    }
+    
+    // 更新插值位置
     interpolated_position[i] = last_interpolated_position_[i] + delta_position;
-    target_velocity[i] = delta_position / 0.001; // Control cycle is 1ms
     
-    // Apply velocity smoothing with lower limit near target
-    double vel_limit = 1.0; // 提高速度上限
-    if (error_abs < approach_threshold) {
-      double normalized_error = error_abs / approach_threshold;
-vel_limit = 0.3 + 0.7 * normalized_error * normalized_error;
+    // 速度计算 - 渐进式衰减
+    double raw_velocity = delta_position * control_frequency;
+    
+    // 根据误差大小应用不同的速度衰减
+    if (error_abs < 0.005) {
+      raw_velocity *= (error_abs / 0.005); // 在5毫弧度内线性衰减
+    } else if (error_abs < 0.02) {
+      raw_velocity *= (0.3 + 0.7 * (error_abs - 0.005) / (0.02 - 0.005)); // 在20毫弧度内衰减到30%
     }
     
-    target_velocity[i] = std::max(std::min(target_velocity[i], vel_limit), -vel_limit);
-  }
-  
-  // Check if we've reached the target point (within tolerance)
-  bool reached_target = true;
-  const double position_tolerance = 0.015; // 提高位置容差，减少过度精确导致的慢速卡顿
-  const double velocity_tolerance = 0.08; // 提高速度容差，允许更早开始下一点
-  
-  double max_pos_error = 0.0;
-  double max_vel = 0.0;
-  
-  for (size_t i = 0; i < 7; ++i) {
-    double error = std::abs(interpolated_position[i] - target_point.position[i]);
-    double vel = std::abs(target_velocity[i]);
-    max_pos_error = std::max(max_pos_error, error);
-    max_vel = std::max(max_vel, vel);
+    // 超强速度滤波 - 减少抖动和突变
+    double velocity_alpha = (error_abs > 0.02) ? 0.2 : 0.05; // 接近目标时极强滤波
+    velocity_filtered_[i] = velocity_alpha * raw_velocity + (1.0 - velocity_alpha) * velocity_filtered_[i];
+    target_velocity[i] = velocity_filtered_[i];
     
-    if (error > position_tolerance) {
-      reached_target = false;
-      break;
+    // Debug output for joint 0 to see interpolation progress
+    if (i == 0) {
+      ROS_INFO_THROTTLE(2.0, "Joint 0 ultra-smooth: last=%.4f, target=%.4f, error=%.6f, delta=%.6f, new=%.4f, vel=%.4f", 
+                       last_interpolated_position_[i], q_desired_target_[i], error_abs, delta_position, interpolated_position[i], target_velocity[i]);
     }
-  }
-  
-  // Only consider target reached if velocity is also low enough
-  // This prevents oscillation around the target
-  if (reached_target && max_vel > velocity_tolerance) {
-    reached_target = false;
-  }
-  
-  // Only advance if we've reached the target
-  if (reached_target) {
-    // We've reached the target, move to next point
-    current_trajectory_index_++;
     
-    if (current_trajectory_index_ >= trajectory_buffer_.size()) {
-      // We've reached the last point, but don't deactivate trajectory yet
-      // This ensures the final position is properly held for one more cycle
-      
-      // If this is the final point, let's hold it stable for a bit longer
-      // to ensure the robot settles completely
-      trajectory_completion_countdown_ = 0; // Reset countdown to start hold period
-    } else {
-      // When moving to a new target, gradually ramp up velocity again
-      // Reset damping for the next target
-      trajectory_completion_countdown_ = 0;
-    }
-  } else {
-    // If we're on the last point and been trying for a while, consider forcing completion
-    if (current_trajectory_index_ == (trajectory_buffer_.size() - 1)) {
-      const int max_attempts = 2; // 减少到200ms，更快完成轨迹
-      const int hold_period = 5;   // 减少稳定保持时间，提高响应性
-      
-      if (trajectory_completion_countdown_ > max_attempts + hold_period) {
-        current_trajectory_index_++;
-        trajectory_completion_countdown_ = 0;
-      } else if (trajectory_completion_countdown_ > max_attempts) {
-        // We're in the hold period, ensure we maintain position
-        // without making further adjustments
-        for (size_t i = 0; i < 7; ++i) {
-          target_velocity[i] = 0.0; // Zero velocity during hold period
-        }
-        trajectory_completion_countdown_++;
-      } else {
-        trajectory_completion_countdown_++;
-      }
+    // Check if target is reached - 使用原始位置误差而非插值误差
+    double final_error = std::abs(q_desired_target_[i] - interpolated_position[i]);
+    max_position_error = std::max(max_position_error, final_error);
+    
+    // 更严格的收敛条件：位置精度 + 速度接近零
+    if (final_error > position_tolerance || std::abs(target_velocity[i]) > velocity_tolerance) {
+      target_reached = false;
     }
   }
   
-  // Update last interpolated state
+  // Trajectory completion logic
+  if (target_reached) {
+    trajectory_active_ = false;
+    // ROS_INFO("DualImpedanceController: Trajectory completed with smooth interpolation (max_error: %.6f)", max_position_error);
+  }
+  
+  // Update state
   last_interpolated_position_ = interpolated_position;
   last_interpolated_velocity_ = target_velocity;
   
-  // If trajectory is at end but still active, deactivate it now
-  if (current_trajectory_index_ >= trajectory_buffer_.size() && trajectory_active_) {
-    // Instead of an abrupt deactivation, gradually transition
-    // by continuing to use the last interpolated position
-    
-    // Only deactivate after a short "settling period"
-    static int deactivation_count = 0;
-    const int settle_cycles = 3; // 减少到30ms settling time，提高响应性
-    
-    if (deactivation_count > settle_cycles) {
-      trajectory_active_ = false;
-      deactivation_count = 0;
-      
-      // Update target positions to match final position from trajectory
-      if (!trajectory_buffer_.empty()) {
-        q_desired_target_ = trajectory_buffer_.back().position;
-      }
-    } else {
-      deactivation_count++;
-    }
-  }
-  
   return interpolated_position;
 }
-
-void DualImpedanceController::clearTrajectory() {
-  trajectory_buffer_.clear();
-  trajectory_active_ = false;
-  trajectory_completion_countdown_ = 0;
-  current_trajectory_index_ = 0;
-}
-
-bool DualImpedanceController::isTrajectoryActive() const {
-  return trajectory_active_ && !trajectory_buffer_.empty();
-}
-
 // Joint command callback - Primary deoxys-compatible interface
 // Handles both single-point and multi-point commands through unified trajectory interpolation
 void DualImpedanceController::jointCommandCallback(
@@ -1019,8 +897,11 @@ void DualImpedanceController::jointCommandCallback(
     return;
   }
   
-  // Clear existing trajectory (deoxys-compatible behavior)
-  clearTrajectory();
+  // Debug output to track commands
+  // ROS_INFO_THROTTLE(0.5, "Received joint command: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+  //                  msg->data[0], msg->data[1], msg->data[2], msg->data[3],
+  //                  msg->data[4], msg->data[5], msg->data[6]);
+  
   
   // Convert ROS message to trajectory point with full trajectory processing
   std::array<double, 7> target_position, target_velocity;
@@ -1036,11 +917,15 @@ void DualImpedanceController::jointCommandCallback(
     target_velocity[i] = 0.0; // Default velocity for single point commands
   }
   
+  // Debug output to validate target position calculation
+  // ROS_INFO_THROTTLE(0.5, "Generated target position: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+  //                  target_position[0], target_position[1], target_position[2], target_position[3],
+  //                  target_position[4], target_position[5], target_position[6]);
+  
   // Save the target position for when the trajectory is complete
   q_desired_target_ = target_position;
   
   // Add trajectory point with full trajectory interpolation (deoxys-compatible)
-  addTrajectoryPoint(target_position, target_velocity);
   external_command_received_ = true;
   
   // Auto-switch to joint mode when receiving joint commands in cartesian mode

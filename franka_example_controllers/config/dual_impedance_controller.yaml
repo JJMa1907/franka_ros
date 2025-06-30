@@ -39,7 +39,7 @@ dual_impedance_controller:
   joint_kd: [20.0, 20.0, 20.0, 20.0, 10.0, 15.0, 8.0]  # Increased damping for smoother motion
 
   # Maximum delta position per control cycle (rad)
-  max_delta_q: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]  # Significantly reduced for smoother transitions
+  max_delta_q: [0.04, 0.04, 0.04, 0.04, 0.05, 0.05, 0.05]  # Significantly reduced for smoother transitions
 
   # Joint limits
   joint_limits_upper: [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973]
