@@ -805,11 +805,6 @@ std::array<double, 7> DualImpedanceController::interpolateTrajectory(
       delta_position = 0.0;
       target_velocity[i] = 0.0;
     }
-    else if (error_abs < 0.01) {
-      // 在10毫弧度内，使用很小的步长（10%最大步长）
-      double small_step = std::min(max_step * 0.1, error_abs * 0.3);
-      delta_position = (position_error > 0) ? small_step : -small_step;
-    }
     else if (error_abs < 0.05) {
       // 在50毫弧度内，渐进式减速（10%-50%最大步长）
       double scale_factor = 0.1 + 0.4 * (error_abs - 0.01) / (0.05 - 0.01);

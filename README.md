@@ -178,6 +178,17 @@ rostopic pub /joint_command std_msgs/Float64MultiArray \
 2. 检查期望的姿态是否可达
 3. 监控 `/force_torque_ext` 话题以确保机器人不会施加过大的力
 4. 渐进式地调整刚度和阻尼参数
+#### configured force thresholds reached
+1. 保守步长策略
+2. 加速度限制
+3. 显著降低PD增益
+4.降低力矩限制 tau_limit_
+#### 卡顿或者抖动
+1. 消除过冲：指数平滑确保渐进
+2. 减少抖动：分层减速 + 自适应滤波
+3. 平滑到达：渐进式速度衰减
+4. 精确定位：严格的收敛检查
+
 
 ---
 
