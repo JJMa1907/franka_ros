@@ -422,6 +422,9 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
 
     // Pose error computation
     Eigen::Matrix<double, 6, 1> error;
+    ROS_INFO_THROTTLE(5.0, "Cartesian Pose: Position: [%.4f, %.4f, %.4f] m, Orientation: [%.4f, %.4f, %.4f] rad",
+                     position[0], position[1], position[2],
+                     orientation.x(), orientation.y(), orientation.z());
     error.head(3) << position - position_d_;
     
     double stiffness_distance = 0.04;
@@ -450,6 +453,14 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     }
 
     tau_task << jacobian.transpose() * (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
+    // ROS_INFO_THROTTLE(5.0, "Cartesian stiffness: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]", 
+    //              cartesian_stiffness_(0, 0), cartesian_stiffness_(1, 1),
+    //              cartesian_stiffness_(2, 2), cartesian_stiffness_(3, 3),
+    //              cartesian_stiffness_(4, 4), cartesian_stiffness_(5, 5));
+    // ROS_INFO_THROTTLE(5.0, "Cartesian damping: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+    //               cartesian_damping_(0, 0), cartesian_damping_(1, 1),
+    //               cartesian_damping_(2, 2), cartesian_damping_(3, 3),
+    //               cartesian_damping_(4, 4), cartesian_damping_(5, 5));  
     tau_nullspace << Null_mat * (nullspace_stiffness_ * null_vect - 
                                  2.0 * sqrt(nullspace_stiffness_) * dq);
     
@@ -470,12 +481,24 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     if (q(6) < -2.8)   { tau_joint_limit(6) = +10; }
     
     tau_d << tau_task + tau_nullspace + coriolis + tau_joint_limit;
+  //     {
+  //     ROS_INFO_THROTTLE(5.0, "Cartesian Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+  //              tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
+  // }
     tau_d = saturateTorqueRate(tau_d, tau_J_d);
     
     cartesian_stiffness_ = cartesian_stiffness_target_;
     cartesian_damping_ = cartesian_damping_target_;
     nullspace_stiffness_ = nullspace_stiffness_target_;
-    
+    ROS_INFO_THROTTLE(5.0, "Cartesian stiffness target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+                 cartesian_stiffness_target_(0, 0), cartesian_stiffness_target_(1, 1),
+                 cartesian_stiffness_target_(2, 2), cartesian_stiffness_target_(3, 3),
+                 cartesian_stiffness_target_(4, 4), cartesian_stiffness_target_(5, 5));
+    ROS_INFO_THROTTLE(5.0, "Cartesian damping target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+                  cartesian_damping_target_(0, 0), cartesian_damping_target_(1, 1),
+                  cartesian_damping_target_(2, 2), cartesian_damping_target_(3, 3),
+                  cartesian_damping_target_(4, 4), cartesian_damping_target_(5, 5));
+
     Eigen::AngleAxisd aa_orientation_d(orientation_d_);
     orientation_d_ = Eigen::Quaterniond(aa_orientation_d);
     
@@ -629,12 +652,10 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     }    
   }
 
-  // {
-  //     ROS_INFO("Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
-  //              tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
-  // }
   // Set joint commands
   for (size_t i = 0; i < 7; ++i) {
+    ROS_INFO_THROTTLE(5.0, "Joint torques (tau_d): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+               tau_d[0], tau_d[1], tau_d[2], tau_d[3], tau_d[4], tau_d[5], tau_d[6]);
     joint_handles_[i].setCommand(tau_d[i]);
   }
 
