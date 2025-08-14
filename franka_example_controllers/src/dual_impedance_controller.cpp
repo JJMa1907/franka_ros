@@ -453,14 +453,14 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     }
 
     tau_task << jacobian.transpose() * (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
-    // ROS_INFO_THROTTLE(5.0, "Cartesian stiffness: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]", 
-    //              cartesian_stiffness_(0, 0), cartesian_stiffness_(1, 1),
-    //              cartesian_stiffness_(2, 2), cartesian_stiffness_(3, 3),
-    //              cartesian_stiffness_(4, 4), cartesian_stiffness_(5, 5));
-    // ROS_INFO_THROTTLE(5.0, "Cartesian damping: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-    //               cartesian_damping_(0, 0), cartesian_damping_(1, 1),
-    //               cartesian_damping_(2, 2), cartesian_damping_(3, 3),
-    //               cartesian_damping_(4, 4), cartesian_damping_(5, 5));  
+    ROS_INFO_THROTTLE(5.0, "Cartesian stiffness: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]", 
+                 cartesian_stiffness_(0, 0), cartesian_stiffness_(1, 1),
+                 cartesian_stiffness_(2, 2), cartesian_stiffness_(3, 3),
+                 cartesian_stiffness_(4, 4), cartesian_stiffness_(5, 5));
+    ROS_INFO_THROTTLE(5.0, "Cartesian damping: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+                  cartesian_damping_(0, 0), cartesian_damping_(1, 1),
+                  cartesian_damping_(2, 2), cartesian_damping_(3, 3),
+                  cartesian_damping_(4, 4), cartesian_damping_(5, 5));  
     tau_nullspace << Null_mat * (nullspace_stiffness_ * null_vect - 
                                  2.0 * sqrt(nullspace_stiffness_) * dq);
     
@@ -490,14 +490,14 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
     cartesian_stiffness_ = cartesian_stiffness_target_;
     cartesian_damping_ = cartesian_damping_target_;
     nullspace_stiffness_ = nullspace_stiffness_target_;
-    ROS_INFO_THROTTLE(5.0, "Cartesian stiffness target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-                 cartesian_stiffness_target_(0, 0), cartesian_stiffness_target_(1, 1),
-                 cartesian_stiffness_target_(2, 2), cartesian_stiffness_target_(3, 3),
-                 cartesian_stiffness_target_(4, 4), cartesian_stiffness_target_(5, 5));
-    ROS_INFO_THROTTLE(5.0, "Cartesian damping target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
-                  cartesian_damping_target_(0, 0), cartesian_damping_target_(1, 1),
-                  cartesian_damping_target_(2, 2), cartesian_damping_target_(3, 3),
-                  cartesian_damping_target_(4, 4), cartesian_damping_target_(5, 5));
+    // ROS_INFO_THROTTLE(5.0, "Cartesian stiffness target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+    //              cartesian_stiffness_target_(0, 0), cartesian_stiffness_target_(1, 1),
+    //              cartesian_stiffness_target_(2, 2), cartesian_stiffness_target_(3, 3),
+    //              cartesian_stiffness_target_(4, 4), cartesian_stiffness_target_(5, 5));
+    // ROS_INFO_THROTTLE(5.0, "Cartesian damping target: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f]",
+    //               cartesian_damping_target_(0, 0), cartesian_damping_target_(1, 1),
+    //               cartesian_damping_target_(2, 2), cartesian_damping_target_(3, 3),
+    //               cartesian_damping_target_(4, 4), cartesian_damping_target_(5, 5));
 
     Eigen::AngleAxisd aa_orientation_d(orientation_d_);
     orientation_d_ = Eigen::Quaterniond(aa_orientation_d);
@@ -976,9 +976,9 @@ void DualImpedanceController::equilibriumStiffnessCallback(
   cartesian_damping_target_(2,2) = 2.0 * sqrt(cartesian_stiffness_target_(2,2));
 
   // Set rotational stiffness with limits (0-50)
-  cartesian_stiffness_target_(3,3) = std::max(std::min(stiff_[3], 50.0f), 0.0f);
-  cartesian_stiffness_target_(4,4) = std::max(std::min(stiff_[4], 50.0f), 0.0f);
-  cartesian_stiffness_target_(5,5) = std::max(std::min(stiff_[5], 50.0f), 0.0f);
+  cartesian_stiffness_target_(3,3) = std::max(std::min(stiff_[3], 500.0f), 0.0f);
+  cartesian_stiffness_target_(4,4) = std::max(std::min(stiff_[4], 500.0f), 0.0f);
+  cartesian_stiffness_target_(5,5) = std::max(std::min(stiff_[5], 500.0f), 0.0f);
 
   // Calculate corresponding rotational damping
   cartesian_damping_target_(3,3) = 2.0 * sqrt(cartesian_stiffness_target_(3,3));
@@ -1172,11 +1172,8 @@ bool DualImpedanceController::controlGripper(double position, double speed, doub
       action_goal.goal.speed = speed;
       action_goal.goal.force = force;
       // Set default epsilon values for grasp tolerance
-      action_goal.goal.epsilon.inner = 0.005;  // 5mm inner tolerance
-      action_goal.goal.epsilon.outer = 0.005;  // 5mm outer tolerance
-      
-      ROS_INFO("DualImpedanceController: Publishing grasp command to gripper: %.4fm at %.3fm/s with %.1fN force", 
-               width_meters, speed, force);
+      action_goal.goal.epsilon.inner = 0.08;  // 5mm inner tolerance
+      action_goal.goal.epsilon.outer = 0.08;  // 5mm outer tolerance
       gripper_grasp_pub_.publish(action_goal);
     }
     

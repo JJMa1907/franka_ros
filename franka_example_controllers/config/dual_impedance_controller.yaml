@@ -23,15 +23,15 @@ dual_impedance_controller:
   # ========== Cartesian Impedance Parameters ==========
   # Stiffness parameters (N/m for translation, Nm/rad for rotation)
   cartesian_stiffness:
-    translational_stiffness_X: 400.0  # Significantly reduced stiffness to avoid discontinuities
-    translational_stiffness_Y: 400.0  # Significantly reduced stiffness to avoid discontinuities
-    translational_stiffness_Z: 400.0  # Significantly reduced stiffness to avoid discontinuities
-    rotational_stiffness_X: 10.0  # Significantly reduced rotational stiffness
-    rotational_stiffness_Y: 10.0  # Significantly reduced rotational stiffness
-    rotational_stiffness_Z: 10.0  # Significantly reduced rotational stiffness
+    translational_stiffness_X: 800.0 
+    translational_stiffness_Y: 800.0 
+    translational_stiffness_Z: 800.0 
+    rotational_stiffness_X: 30.0 
+    rotational_stiffness_Y: 30.0 
+    rotational_stiffness_Z: 30.0 
 
   # Nullspace stiffness
-  nullspace_stiffness: 10.0
+  nullspace_stiffness: 30.0
 
   # ========== Joint Impedance Parameters ==========
   # Joint impedance gains

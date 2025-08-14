@@ -4,9 +4,9 @@
 # Single node configuration format for dynamic_reconfigure
 {
   # Translational stiffness parameters (N/m) - further reduced for smoother motion
-  translational_stiffness_X: 400.0,
-  translational_stiffness_Y: 400.0,
-  translational_stiffness_Z: 400.0,
+  translational_stiffness_X: 800.0,
+  translational_stiffness_Y: 800.0,
+  translational_stiffness_Z: 800.0,
 
   # Rotational stiffness parameters (Nm/rad) - further reduced for smoother motion
   rotational_stiffness_X: 10.0,
