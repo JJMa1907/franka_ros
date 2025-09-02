@@ -193,6 +193,10 @@ class DualImpedanceController : public controller_interface::MultiInterfaceContr
   ros::Subscriber joint_command_sub_;
   void jointCommandCallback(const std_msgs::Float64MultiArrayConstPtr& msg);
   
+  // Joint gains subscriber  
+  ros::Subscriber joint_gains_sub_;
+  void jointGainsCallback(const std_msgs::Float64MultiArrayConstPtr& msg);
+  
   // Common parameters
   const double delta_tau_max_{1.0};
   const double kDeltaTauMax{1.0};

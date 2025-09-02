@@ -40,6 +40,11 @@ bool DualImpedanceController::init(hardware_interface::RobotHW* robot_hw,
       "/joint_command", 1, &DualImpedanceController::jointCommandCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
 
+  // Joint gains subscriber for modifying k_gains_ and d_gains_
+  joint_gains_sub_ = node_handle.subscribe(
+      "/joint_gains", 1, &DualImpedanceController::jointGainsCallback, this,
+      ros::TransportHints().reliable().tcpNoDelay());
+
   // Publishers
   pub_stiff_update_ = node_handle.advertise<dynamic_reconfigure::Config>(
       "/dynamic_reconfigure_compliance_param_node/parameter_updates", 5);
@@ -615,6 +620,7 @@ void DualImpedanceController::update(const ros::Time& time, const ros::Duration&
       pos_error[i] = position_error;
 
       // PD control calculation with reduced gains during startup
+      ROS_INFO_THROTTLE(5, "k_gains_ = %.3f", d_gains_[i]);
       double effective_k = startup_phase_ ? k_gains_[i] * startup_factor : k_gains_[i];
       double effective_d = startup_phase_ ? d_gains_[i] * startup_factor : d_gains_[i];
       
@@ -1183,6 +1189,48 @@ bool DualImpedanceController::controlGripper(double position, double speed, doub
     ROS_ERROR("DualImpedanceController: Error controlling gripper: %s", e.what());
     return false;
   }
+}
+
+void DualImpedanceController::jointGainsCallback(const std_msgs::Float64MultiArrayConstPtr& msg) {
+  // Expected message format: [k0, k1, k2, k3, k4, k5, k6, d0, d1, d2, d3, d4, d5, d6]
+  // First 7 elements are k_gains_, next 7 elements are d_gains_
+  
+  if (msg->data.size() != 14) {
+    ROS_ERROR("DualImpedanceController: Joint gains message must have 14 elements [k0-k6, d0-d6]");
+    return;
+  }
+  
+  // Validate gain values to ensure they are positive and within reasonable bounds
+  bool valid_gains = true;
+  for (size_t i = 0; i < 14; ++i) {
+    if (msg->data[i] < 0.0 || msg->data[i] > 1000.0) {
+      ROS_ERROR("DualImpedanceController: Invalid gain value %.2f at index %zu (must be 0-1000)", 
+                msg->data[i], i);
+      valid_gains = false;
+    }
+  }
+  
+  if (!valid_gains) {
+    return;
+  }
+  
+  // Update k_gains_
+  for (size_t i = 0; i < 7; ++i) {
+    k_gains_[i] = msg->data[i];
+  }
+  
+  // Update d_gains_  
+  for (size_t i = 0; i < 7; ++i) {
+    d_gains_[i] = msg->data[i + 7];
+  }
+  
+  ROS_INFO("DualImpedanceController: Updated joint gains:");
+  ROS_INFO("  K gains: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+           k_gains_[0], k_gains_[1], k_gains_[2], k_gains_[3],
+           k_gains_[4], k_gains_[5], k_gains_[6]);
+  ROS_INFO("  D gains: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
+           d_gains_[0], d_gains_[1], d_gains_[2], d_gains_[3],
+           d_gains_[4], d_gains_[5], d_gains_[6]);
 }
 }  // namespace franka_example_controllers
 
