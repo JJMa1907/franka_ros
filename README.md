@@ -60,7 +60,7 @@ source devel/setup.sh
 
 #### 2. 软件激活与校准
 ##### Franka 机器人启动步骤
-- [ ] 进入上位机 ubuntu2，rt系统，Password: [请填入密码]
+- [ ] 进入上位机 ubuntu20，rt系统，Password: [请填入密码]
 - [ ] 打开franka控制器
 - [ ] 登录franka图形控制界面 (e.g. 171.16.0.3)
 - [ ] 激活关节
@@ -77,14 +77,14 @@ source devel/setup.sh
    - 切换到 Programming 模式，在 Pilot Mode 中选择夹爪控制选项，点击 Homing 按钮
    - **注意**: 校准前夹爪必须无物体阻挡，否则零点位置会错误
 
-### 笔记本设置
+### 上位机设置
 
-本机ip设置 `172.16.0.5` ，mask`255.255.255.0`，ROS Master: `172.16.0.1.113311` ,
+本机ip设置 `172.16.0.4` ，mask`255.255.255.0`，ROS Master: `172.16.0.4.113311` ,
 每次使用前都设置好，或者放在bashrc / zshrc 中并source
 ```shell
-export ROS_MASTER_URI=http://172.16.0.2:11311
-export ROS_IP=172.16.0.5
-export ROS_HOSTNAME=172.16.0.5
+export ROS_MASTER_URI=http://172.16.0.4:11311
+export ROS_IP=172.16.0.4
+export ROS_HOSTNAME=172.16.0.4
 ```
 
 ## 环境变量与代理设置
@@ -202,7 +202,6 @@ rostopic pub -1 /franka_gripper/homing/goal franka_gripper/HomingActionGoal "{}"
 rostopic pub --once /franka_gripper/move/goal franka_gripper/MoveActionGoal "goal: { width: 0.08, speed: 0.1 }"
 # Grasp
 rostopic pub --once /franka_gripper/grasp/goal franka_gripper/GraspActionGoal "goal: { width: 0.03, epsilon:{ inner: 0.005, outer: 0.005 }, speed: 0.1, force: 5.0}"
-```
 
 ```
 rostopic pub /franka_gripper/grasp/goal franka_gripper/GraspveActionGoal "header:
