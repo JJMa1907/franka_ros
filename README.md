@@ -80,7 +80,7 @@ source devel/setup.sh
 ### 上位机设置
 
 本机ip设置 `172.16.0.4` ，mask`255.255.255.0`，ROS Master: `172.16.0.4.113311` ,
-每次使用前都设置好，或者放在bashrc / zshrc 中并source
+**网络内所有电脑设置每次使用前都设置好**，或者放在bashrc / zshrc 中并source
 ```shell
 export ROS_MASTER_URI=http://172.16.0.4:11311
 export ROS_IP=172.16.0.4
@@ -236,6 +236,22 @@ pub.publish(msg)
 msg.data = [0.02, 0.05, 8.0]
 pub.publish(msg)
 ```
+# moveit!
+安装 MoveIt! 和基本依赖
+安装 MoveIt! 运动规划框架及相关的控制器插件：
+
+```
+sudo apt install ros-noetic-moveit
+```
+重新编译
+``` bash
+catkin_make -DCMAKE_BUILD_TYPE=Release -DFranka_DIR=/usr/local/lib/cmake/Franka
+source devel/setup.bash
+```
+
+``` bash
+roslaunch panda_moveit_config franka_control.launch robot_ip:=172.16.0.2 load_gripper:=false
+```
 
 ## 常见问题与故障排除
 
@@ -273,6 +289,3 @@ source ~/franka_ros_env.sh
 - [github repo](https://github.com/frankaemika/franka_ros)
 - [compatibility](https://frankaemika.github.io/docs/compatibility.html)
 - [franka hand 文档](https://download.franka.de/documents/220010_Product%20Manual_Franka%20Hand_1.2_ZH.pdf)
-
-
-[array([ 0.092, -0.198, -0.02 , -2.473, -0.013,  2.304,  0.848,  0.04 ,  0.04 ]), array([ 0.177,  0.484, -0.185, -1.207,  0.175,  1.981,  2.193,  0.04 ,  0.04 ]), array([ 0.194,  0.747, -0.155, -1.184,  0.184,  2.099,  2.201])]
