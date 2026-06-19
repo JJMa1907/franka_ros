@@ -7,13 +7,14 @@
 - [快速启动流程](#快速启动流程)
 - [环境变量与代理设置](#环境变量与代理设置)
 - [控制器与夹爪控制](#控制器与夹爪控制)
+- [franky兼容后端](#franky兼容后端)
 - [常见问题与故障排除](#常见问题与故障排除)
 - [开发与兼容性](#开发与兼容性)
 - [参考文档](#参考文档)
 
 ## 网络与环境准备
 
-1. **局域网配置**：所有设备（如上位机、机器人、PC）需在同一子网（如`172.16.0.0/24`），IP不重复，网关指向路由器（如`172.16.0.1`），关闭DHCP，手动分配IP。
+1. **局域网配置**：所有设备（如上位机、机器人、PC）需在同一子网（如`172.16.0.0/24`），IP不重复，网关指向上位机（如`172.16.0.4`，速度最快，最小可能报通信延迟错误），关闭DHCP，手动分配IP。
 2. **物理连接**：所有设备通过网线连接到路由器LAN口，无需外网。
 3. **防火墙与hosts**：确保防火墙允许内网通信，`/etc/hosts` 配置正确， 可能影响ROS 话题功能。
 4. **验证**：设备间可互ping，能访问各自服务（如Franka控制器Web界面）。
@@ -123,7 +124,7 @@ rosdep install ... # 见上
 
 ``` bash
 cd catkin_ws/src/franka_ros
-sh ./launch_franka_with_rviz.sh # ./ matters
+sh ./launch_franka_with_rviz.sh # ./ matters 使用系统环境不用conda,防止缺少ROS依赖
 ```
 
 **笛卡尔阻抗控制器**
@@ -138,6 +139,80 @@ roslaunch franka_example_controllers joint_impedance_unified.launch load_gripper
 ```bash
 roslaunch franka_example_controllers dual_impedance_controller.launch load_gripper:=true robot_ip:=172.16.0.3 arm_id:="panda"
 ```
+## franky兼容后端
+
+如果你希望用 `franky` 复刻下面这条命令，并且**对外继续提供相同 ROS 接口**：
+
+```bash
+roslaunch franka_example_controllers cartesian_impedance_example_controller.launch load_gripper:=true robot_ip:=172.16.0.2
+```
+
+默认命令保持原 `ros_control` 路径不变；只有显式指定 `backend:=franky` 才启动 ROS 兼容桥接层：
+
+```bash
+roslaunch franka_example_controllers cartesian_impedance_example_controller.launch backend:=franky load_gripper:=true robot_ip:=172.16.0.2
+```
+
+也可以继续使用仓库里的便捷脚本：
+
+```bash
+cd ~/jjma/catkin_ws/src/franka_ros
+BACKEND=franky_compat ./launch_franka_with_rviz.sh launch_rqt:=false
+```
+
+兼容桥的 ROS 进程使用系统 Python 运行，避免 conda 环境中 `rospy.init_node()` 卡住；Franky 机器人运行时会在内部子进程中自动选择可导入 `franky` 的 Python。若需要指定 Franky 解释器，可设置 `FRANKY_PYTHON=/path/to/python3`。
+
+也可以单独启动兼容桥脚本用于调试：
+
+```bash
+cd ~/jjma/catkin_ws/src/franka_ros
+./launch_franky_cartesian_impedance.sh interface:=ros load_gripper:=true robot_ip:=172.16.0.2
+```
+
+兼容层对外接口（可直接复用原有上层程序）：
+- 订阅：`/equilibrium_pose` (`geometry_msgs/PoseStamped`)
+- 订阅：`/equilibrium_configuration` (`std_msgs/Float32MultiArray`)
+- 订阅：`/joint_command` (`std_msgs/Float64MultiArray`)
+- 订阅：`/gripper_control` (`std_msgs/Float64MultiArray`)
+- 订阅：`/impedance_mode` (`std_msgs/Bool`)
+- 订阅：`/stiffness` (`std_msgs/Float32MultiArray`)（会同步到 `dynamic_reconfigure_compliance_param_node` 并尽力映射到 franky 刚度接口）
+- 发布：`/cartesian_pose` (`geometry_msgs/PoseStamped`)
+- 发布：`/robot_pose` (`geometry_msgs/Pose`)
+- 发布：`/impedance_mode_status` (`std_msgs/Bool`)
+- 发布：`/current_impedance_mode` (`std_msgs/String`)
+- 发布：`/joint_states` (`sensor_msgs/JointState`)
+- 发布：`/franka_state_controller/joint_states` (`sensor_msgs/JointState`)
+- 发布：`/franka_state_controller/joint_states_desired` (`sensor_msgs/JointState`)
+- 发布：`/franka_state_controller/franka_states` (`franka_msgs/FrankaState`)
+- 发布：`/franka_state_controller/F_ext` (`geometry_msgs/WrenchStamped`)
+- 发布：`/force_torque_ext` (`geometry_msgs/WrenchStamped`)
+- 发布：`/franka_gripper/joint_states` (`sensor_msgs/JointState`)
+
+参数说明（保持 roslaunch 风格传参）：
+- `robot_ip:=172.16.0.2`
+- `load_gripper:=true`
+- `arm_id:=panda`
+- `launch_marker:=true`（franky 兼容后端默认启动 `interactive_marker.py`，为 `/equilibrium_pose` 提供 RViz 交互目标）
+- `dynamics:=0.05`
+- `auto_recover:=true`
+- `connect_on_start:=false`（默认懒连接，ROS 接口先上线；收到机器人命令后再连接）
+- `pose_rate_hz:=20.0`
+- `external_command_hold_sec:=10.0`（外部程序或 `rostopic pub` 发送 `/equilibrium_pose` 后，在这段时间内忽略 `interactive_marker` 的固定刷新，避免外部目标被覆盖）
+
+如需手工调试，可切换到 CLI：
+
+```bash
+./launch_franky_cartesian_impedance.sh interface:=cli load_gripper:=true robot_ip:=172.16.0.2
+```
+
+注意：
+- 运行前仍需在 Franka Desk 中解锁刹车并启用 FCI。
+- 若使用非实时内核，可能出现 `communication_constraints_violation` 等报错。
+- 默认 `roslaunch franka_example_controllers cartesian_impedance_example_controller.launch ...` 仍然走原 `ros_control` 路径；只有显式加上 `backend:=franky` 才会切换到兼容桥接后端。
+- `dynamic_reconfigure.client.Client("/dynamic_reconfigure_compliance_param_node")` 需要和现有仓内脚本一样先调用 `rospy.init_node(...)`。
+- 高频 `/equilibrium_pose`、`/joint_command`、`/equilibrium_configuration` 会在兼容层内合并为“最新目标”，不会把旧目标无限排队；底层使用 franky 异步 motion 并在新目标到来时切换，尽量贴近原控制器的目标更新语义。
+- 如果机器人不动，先用 `rostopic info /equilibrium_pose` 检查是否真的有 `Publishers`；若同时看到 `/interactive_marker` 和外部程序，兼容层会让外部程序优先，避免 marker 高频刷新抢回目标。
+
 ### 一些常用的ROS topic
 ``` bash
 rostopic echo /cartesian_pose # 获取机器人夹爪中心点坐标

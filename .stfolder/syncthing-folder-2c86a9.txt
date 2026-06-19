@@ -1,0 +1,5 @@
+# This directory is a Syncthing folder marker.
+# Do not delete.
+
+folderID: 4wpo7-dwrew
+created: 2025-07-26T10:30:07+08:00

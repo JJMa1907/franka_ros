@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   controller_interface
   dynamic_reconfigure
   eigen_conversions
+  franka_msgs
   franka_hw
   franka_gripper
   geometry_msgs
@@ -21,7 +22,9 @@ find_package(catkin REQUIRED COMPONENTS
   realtime_tools
   roscpp
   rospy
+  sensor_msgs
   std_msgs
+  tf2_msgs
   urdf
   visualization_msgs
 )
@@ -61,6 +64,7 @@ catkin_package(
     controller_interface
     dynamic_reconfigure
     eigen_conversions
+    franka_msgs
     franka_hw
     franka_gripper
     geometry_msgs
@@ -72,7 +76,9 @@ catkin_package(
     pluginlib
     realtime_tools
     roscpp
+    sensor_msgs
     urdf
+    tf2_msgs
     visualization_msgs
   DEPENDS Franka
 )
@@ -151,7 +157,11 @@ install(FILES franka_example_controllers_plugin.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 catkin_install_python(
-  PROGRAMS scripts/interactive_marker.py scripts/move_to_start.py scripts/dual_arm_interactive_marker.py
+  PROGRAMS
+    scripts/interactive_marker.py
+    scripts/move_to_start.py
+    scripts/dual_arm_interactive_marker.py
+    scripts/franky_cartesian_impedance_compat.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
